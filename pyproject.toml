@@ -1,0 +1,29 @@
+[project]
+name = "z2m-mcp"
+version = "0.1.0"
+description = "Zigbee2MQTT diagnostics and control MCP server"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.4.1",
+    "aiomqtt>=2.0.0",
+]
+
+[project.scripts]
+z2m-mcp = "app.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.24.0",
+]

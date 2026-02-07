@@ -1,0 +1,555 @@
+"""MCP server with Z2M diagnostic and control tools."""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+from app.config import load_config
+from app.mqtt_client import Z2MClient
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(server: FastMCP):
+    """Start MQTT client on server startup."""
+    config = load_config()
+
+    z2m = Z2MClient(config.mqtt, log_config=config.log)
+
+    await z2m.start()
+
+    try:
+        yield {"z2m": z2m}
+    finally:
+        await z2m.stop()
+
+
+mcp = FastMCP("Z2M-MCP", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def get_bridge_info() -> dict[str, Any]:
+    """Get Zigbee2MQTT bridge information.
+
+    Returns Z2M version, coordinator firmware, Zigbee channel, PAN ID,
+    permit_join status, and device count.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    info = z2m.get_bridge_info()
+    if not info:
+        raise RuntimeError("Bridge info not yet available. Z2M may not be running.")
+
+    coordinator = info.get("coordinator", {})
+    network = info.get("network", {})
+    devices = z2m.get_all_devices()
+
+    # Count by type
+    type_counts: dict[str, int] = {}
+    for d in devices:
+        t = d.get("type", "Unknown")
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    return {
+        "version": info.get("version"),
+        "zigbee_herdsman": info.get("zigbee_herdsman", {}).get("version"),
+        "zigbee_herdsman_converters": info.get("zigbee_herdsman_converters", {}).get("version"),
+        "coordinator": {
+            "type": coordinator.get("type"),
+            "ieee_address": coordinator.get("ieee_address"),
+            "firmware_revision": coordinator.get("meta", {}).get("revision"),
+        },
+        "network": {
+            "channel": network.get("channel"),
+            "pan_id": network.get("pan_id"),
+            "extended_pan_id": network.get("extended_pan_id"),
+        },
+        "permit_join": info.get("permit_join", False),
+        "log_level": info.get("log_level"),
+        "restart_required": info.get("restart_required", False),
+        "device_count": len(devices),
+        "device_types": type_counts,
+    }
+
+
+@mcp.tool()
+async def list_devices(
+    device_type: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """List all Zigbee devices.
+
+    Returns lean format: friendly_name, type, model, vendor, power_source,
+    and last state info (LQI, last_seen) when available.
+
+    Args:
+        device_type: Filter by type: Router, EndDevice, or Coordinator.
+        limit: Maximum number of devices to return.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    devices = z2m.get_all_devices()
+
+    if device_type:
+        devices = [d for d in devices if d.get("type") == device_type]
+
+    total = len(devices)
+    devices = devices[:limit]
+
+    result = []
+    for d in devices:
+        definition = d.get("definition") or {}
+        state = d.get("state", {})
+        entry: dict[str, Any] = {
+            "friendly_name": d.get("friendly_name"),
+            "ieee_address": d.get("ieee_address"),
+            "type": d.get("type"),
+            "model": definition.get("model"),
+            "vendor": definition.get("vendor"),
+            "power_source": d.get("power_source"),
+            "supported": d.get("supported"),
+        }
+        if "linkquality" in state:
+            entry["lqi"] = state["linkquality"]
+        if "last_seen" in state:
+            entry["last_seen"] = state["last_seen"]
+        result.append(entry)
+
+    return {
+        "devices": result,
+        "count": len(result),
+        "total": total,
+        "truncated": total > limit,
+    }
+
+
+@mcp.tool()
+async def get_device_info(
+    device: str,
+    detailed: bool = False,
+) -> dict[str, Any]:
+    """Get detailed info for a specific Zigbee device.
+
+    Args:
+        device: Device friendly_name or IEEE address.
+        detailed: If True, include full endpoint/cluster data.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    d = z2m.get_device(device)
+    if not d:
+        raise ValueError(f"Device '{device}' not found")
+
+    definition = d.get("definition") or {}
+    state = d.get("state", {})
+
+    result: dict[str, Any] = {
+        "friendly_name": d.get("friendly_name"),
+        "ieee_address": d.get("ieee_address"),
+        "type": d.get("type"),
+        "network_address": d.get("network_address"),
+        "model": definition.get("model"),
+        "vendor": definition.get("vendor"),
+        "description": definition.get("description"),
+        "manufacturer": d.get("manufacturer"),
+        "model_id": d.get("model_id"),
+        "power_source": d.get("power_source"),
+        "supported": d.get("supported"),
+        "disabled": d.get("disabled"),
+        "interview_completed": d.get("interview_completed"),
+        "interviewing": d.get("interviewing"),
+    }
+
+    if state:
+        result["state"] = state
+
+    if detailed:
+        result["endpoints"] = d.get("endpoints")
+
+    return result
+
+
+@mcp.tool()
+async def get_network_map() -> dict[str, Any]:
+    """Get the Zigbee network topology map.
+
+    Returns structured topology showing coordinator, routers, and end devices
+    with link quality (LQI) on connections. This request may take 10-30 seconds.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    response = await z2m.request_response(
+        request_topic="zigbee2mqtt/bridge/request/networkmap",
+        response_topic="zigbee2mqtt/bridge/response/networkmap",
+        payload={"type": "raw", "routes": True},
+        timeout=60.0,
+    )
+
+    data = response.get("data", {})
+    nodes = data.get("value", {}).get("nodes", data.get("nodes", []))
+    links = data.get("value", {}).get("links", data.get("links", []))
+
+    # Build structured output
+    structured_nodes = []
+    for node in nodes:
+        structured_nodes.append({
+            "ieee_address": node.get("ieeeAddr"),
+            "friendly_name": node.get("friendlyName"),
+            "type": node.get("type"),
+            "network_address": node.get("networkAddress"),
+            "model": node.get("definition", {}).get("model") if node.get("definition") else None,
+        })
+
+    structured_links = []
+    for link in links:
+        structured_links.append({
+            "source": link.get("source", {}).get("ieeeAddr"),
+            "target": link.get("target", {}).get("ieeeAddr"),
+            "lqi": link.get("linkquality"),
+            "depth": link.get("depth"),
+            "relationship": link.get("relationship"),
+        })
+
+    return {
+        "nodes": structured_nodes,
+        "links": structured_links,
+        "node_count": len(structured_nodes),
+        "link_count": len(structured_links),
+    }
+
+
+@mcp.tool()
+async def get_device_health(device: str) -> dict[str, Any]:
+    """Get health summary for a specific device.
+
+    Shows last_seen age, link quality, availability status, and battery level.
+
+    Args:
+        device: Device friendly_name or IEEE address.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    d = z2m.get_device(device)
+    if not d:
+        raise ValueError(f"Device '{device}' not found")
+
+    state = d.get("state", {})
+    definition = d.get("definition") or {}
+    now = datetime.now(timezone.utc)
+
+    health: dict[str, Any] = {
+        "friendly_name": d.get("friendly_name"),
+        "ieee_address": d.get("ieee_address"),
+        "type": d.get("type"),
+        "model": definition.get("model"),
+        "power_source": d.get("power_source"),
+        "interview_completed": d.get("interview_completed"),
+    }
+
+    # LQI
+    lqi = state.get("linkquality")
+    if lqi is not None:
+        health["lqi"] = lqi
+        if lqi >= 100:
+            health["lqi_status"] = "good"
+        elif lqi >= 50:
+            health["lqi_status"] = "fair"
+        else:
+            health["lqi_status"] = "poor"
+
+    # Last seen
+    last_seen = state.get("last_seen")
+    if last_seen:
+        health["last_seen"] = last_seen
+        try:
+            if isinstance(last_seen, (int, float)):
+                ls_dt = datetime.fromtimestamp(last_seen / 1000, tz=timezone.utc)
+            else:
+                ls_dt = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+            age_seconds = (now - ls_dt).total_seconds()
+            health["last_seen_age_minutes"] = round(age_seconds / 60, 1)
+            if age_seconds < 3600:
+                health["availability"] = "online"
+            elif age_seconds < 86400:
+                health["availability"] = "stale"
+            else:
+                health["availability"] = "offline"
+        except (ValueError, TypeError):
+            health["availability"] = "unknown"
+
+    # Battery
+    battery = state.get("battery")
+    if battery is not None:
+        health["battery"] = battery
+        if battery >= 50:
+            health["battery_status"] = "good"
+        elif battery >= 20:
+            health["battery_status"] = "low"
+        else:
+            health["battery_status"] = "critical"
+
+    return health
+
+
+@mcp.tool()
+async def list_weak_devices(
+    lqi_threshold: int = 50,
+    stale_hours: float = 6.0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List devices with weak signal or stale last_seen.
+
+    Finds devices with LQI below threshold or that haven't reported
+    within stale_hours. Useful for identifying network problems.
+
+    Args:
+        lqi_threshold: LQI values below this are flagged (default: 50).
+        stale_hours: Hours since last report to flag as stale (default: 6).
+        limit: Maximum number of results.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    devices = z2m.get_all_devices()
+    now = datetime.now(timezone.utc)
+    weak: list[dict[str, Any]] = []
+
+    for d in devices:
+        if d.get("type") == "Coordinator":
+            continue
+
+        state = d.get("state", {})
+        definition = d.get("definition") or {}
+        issues: list[str] = []
+
+        lqi = state.get("linkquality")
+        if lqi is not None and lqi < lqi_threshold:
+            issues.append(f"low_lqi ({lqi})")
+
+        last_seen = state.get("last_seen")
+        age_hours = None
+        if last_seen:
+            try:
+                if isinstance(last_seen, (int, float)):
+                    ls_dt = datetime.fromtimestamp(last_seen / 1000, tz=timezone.utc)
+                else:
+                    ls_dt = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+                age_hours = (now - ls_dt).total_seconds() / 3600
+                if age_hours > stale_hours:
+                    issues.append(f"stale ({age_hours:.1f}h)")
+            except (ValueError, TypeError):
+                pass
+
+        if issues:
+            weak.append({
+                "friendly_name": d.get("friendly_name"),
+                "ieee_address": d.get("ieee_address"),
+                "type": d.get("type"),
+                "model": definition.get("model"),
+                "lqi": lqi,
+                "last_seen_hours_ago": round(age_hours, 1) if age_hours else None,
+                "issues": issues,
+            })
+
+    weak.sort(key=lambda x: x.get("lqi") or 999)
+    total = len(weak)
+    weak = weak[:limit]
+
+    return {
+        "devices": weak,
+        "count": len(weak),
+        "total": total,
+        "truncated": total > limit,
+        "thresholds": {
+            "lqi": lqi_threshold,
+            "stale_hours": stale_hours,
+        },
+    }
+
+
+@mcp.tool()
+async def analyze_logs(
+    minutes_back: int = 60,
+    level: str | None = None,
+) -> dict[str, Any]:
+    """Analyze Zigbee2MQTT logs for errors and issues.
+
+    Returns recent log entries from the in-memory buffer (last 1000 messages).
+    Full history is persisted to a JSONL file for offline analysis.
+
+    Args:
+        minutes_back: Number of minutes of logs to analyze (default: 60).
+        level: Filter by level: error, warn, info, or debug.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    entries = z2m.get_logs(minutes_back=minutes_back, level=level)
+
+    error_count = sum(1 for e in entries if e.get("level") == "error")
+    warning_count = sum(1 for e in entries if e.get("level") == "warn")
+
+    return {
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "entries": entries,
+        "total_in_buffer": z2m.get_log_buffer_size(),
+        "log_file": z2m.get_log_file_path(),
+        "note": (
+            f"Showing {len(entries)} entries from last {minutes_back} minutes. "
+            f"In-memory buffer holds up to {z2m.get_log_buffer_size()} of the last "
+            f"1000 messages. Full history is in the JSONL log file."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Control Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def permit_join(
+    enable: bool = True,
+    time: int = 120,
+) -> dict[str, Any]:
+    """Enable or disable Zigbee pairing mode.
+
+    Args:
+        enable: True to enable pairing, False to disable.
+        time: Timeout in seconds for pairing mode (default: 120).
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    return await z2m.request_response(
+        request_topic="zigbee2mqtt/bridge/request/permit_join",
+        response_topic="zigbee2mqtt/bridge/response/permit_join",
+        payload={"value": enable, "time": time},
+    )
+
+
+@mcp.tool()
+async def reconfigure_device(device: str) -> dict[str, Any]:
+    """Force a device re-interview and reconfiguration.
+
+    Useful when a device is misbehaving or after firmware update.
+
+    Args:
+        device: Device friendly_name or IEEE address.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    # Verify device exists
+    d = z2m.get_device(device)
+    if not d:
+        raise ValueError(f"Device '{device}' not found")
+
+    return await z2m.request_response(
+        request_topic="zigbee2mqtt/bridge/request/device/configure",
+        response_topic="zigbee2mqtt/bridge/response/device/configure",
+        payload={"id": device},
+    )
+
+
+@mcp.tool()
+async def rename_device(
+    old_name: str,
+    new_name: str,
+) -> dict[str, Any]:
+    """Rename a Zigbee device.
+
+    Args:
+        old_name: Current device friendly_name or IEEE address.
+        new_name: New friendly name for the device.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    # Verify device exists
+    d = z2m.get_device(old_name)
+    if not d:
+        raise ValueError(f"Device '{old_name}' not found")
+
+    return await z2m.request_response(
+        request_topic="zigbee2mqtt/bridge/request/device/rename",
+        response_topic="zigbee2mqtt/bridge/response/device/rename",
+        payload={"from": old_name, "to": new_name},
+    )
+
+
+@mcp.tool()
+async def remove_device(
+    device: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Remove a device from the Zigbee network.
+
+    Args:
+        device: Device friendly_name or IEEE address.
+        force: If True, force-remove even if device is unresponsive.
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    # Verify device exists
+    d = z2m.get_device(device)
+    if not d:
+        raise ValueError(f"Device '{device}' not found")
+
+    return await z2m.request_response(
+        request_topic="zigbee2mqtt/bridge/request/device/remove",
+        response_topic="zigbee2mqtt/bridge/response/device/remove",
+        payload={"id": device, "force": force},
+    )
+
+
+@mcp.tool()
+async def restart_z2m() -> dict[str, Any]:
+    """Restart the Zigbee2MQTT service."""
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    return await z2m.request_response(
+        request_topic="zigbee2mqtt/bridge/request/restart",
+        response_topic="zigbee2mqtt/bridge/response/restart",
+        payload={},
+    )
+
+
+@mcp.tool()
+async def set_log_level(level: str) -> dict[str, Any]:
+    """Change the Zigbee2MQTT log level.
+
+    Args:
+        level: Log level: debug, info, warn, or error.
+    """
+    valid_levels = ("debug", "info", "warn", "error")
+    if level not in valid_levels:
+        raise ValueError(f"Invalid log level '{level}'. Must be one of: {', '.join(valid_levels)}")
+
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    return await z2m.request_response(
+        request_topic="zigbee2mqtt/bridge/request/options",
+        response_topic="zigbee2mqtt/bridge/response/options",
+        payload={"options": {"advanced": {"log_level": level}}},
+    )
