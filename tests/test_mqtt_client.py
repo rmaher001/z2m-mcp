@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -225,6 +226,89 @@ class TestZ2MClientLogCapture:
 
     def test_get_log_file_path_none_without_config(self, z2m_client: Z2MClient) -> None:
         assert z2m_client.get_log_file_path() is None
+
+
+class TestGetLogsFromFile:
+    def test_reads_from_jsonl_file(self, z2m_client_with_logs: Z2MClient) -> None:
+        """Write entries via _process_log_message, flush, read back with get_logs_from_file."""
+        z2m_client_with_logs._process_log_message(
+            json.dumps({"level": "error", "message": "file error 1"})
+        )
+        z2m_client_with_logs._process_log_message(
+            json.dumps({"level": "info", "message": "file info 1"})
+        )
+        z2m_client_with_logs._log_writer.flush()
+
+        results = z2m_client_with_logs.get_logs_from_file(minutes_back=60)
+        assert len(results) == 2
+        messages = [r["message"] for r in results]
+        assert "file error 1" in messages
+        assert "file info 1" in messages
+
+    def test_filters_by_time(self, z2m_client_with_logs: Z2MClient) -> None:
+        """Old entries excluded by minutes_back filter."""
+        # Write an old entry directly to the file
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        old_line = json.dumps({"timestamp": old_ts, "level": "error", "message": "old"})
+        record = logging.LogRecord(
+            name="z2m", level=logging.INFO, pathname="", lineno=0,
+            msg=old_line, args=(), exc_info=None,
+        )
+        z2m_client_with_logs._log_writer.emit(record)
+
+        # Write a recent entry via normal path
+        z2m_client_with_logs._process_log_message(
+            json.dumps({"level": "info", "message": "recent"})
+        )
+        z2m_client_with_logs._log_writer.flush()
+
+        results = z2m_client_with_logs.get_logs_from_file(minutes_back=60)
+        assert len(results) == 1
+        assert results[0]["message"] == "recent"
+
+    def test_filters_by_level(self, z2m_client_with_logs: Z2MClient) -> None:
+        """Level filtering works on file-based entries."""
+        z2m_client_with_logs._process_log_message(
+            json.dumps({"level": "error", "message": "err"})
+        )
+        z2m_client_with_logs._process_log_message(
+            json.dumps({"level": "info", "message": "inf"})
+        )
+        z2m_client_with_logs._log_writer.flush()
+
+        results = z2m_client_with_logs.get_logs_from_file(minutes_back=60, level="error")
+        assert len(results) == 1
+        assert results[0]["level"] == "error"
+
+    def test_missing_file_returns_empty(self, z2m_client_with_logs: Z2MClient) -> None:
+        """No crash when the JSONL file doesn't exist yet."""
+        # Point to a file that doesn't exist
+        z2m_client_with_logs._log_file_path = "/tmp/nonexistent_z2m_test.jsonl"
+        results = z2m_client_with_logs.get_logs_from_file(minutes_back=60)
+        assert results == []
+
+    def test_no_log_config_returns_empty(self, z2m_client: Z2MClient) -> None:
+        """Client without log config returns empty list."""
+        results = z2m_client.get_logs_from_file(minutes_back=60)
+        assert results == []
+
+    def test_malformed_lines_skipped(self, z2m_client_with_logs: Z2MClient) -> None:
+        """Corrupt JSON lines are silently skipped."""
+        # Write a valid entry
+        z2m_client_with_logs._process_log_message(
+            json.dumps({"level": "info", "message": "valid"})
+        )
+        z2m_client_with_logs._log_writer.flush()
+
+        # Append a malformed line directly to the file
+        log_path = z2m_client_with_logs.get_log_file_path()
+        with open(log_path, "a") as f:
+            f.write("this is not valid json\n")
+            f.write('{"timestamp": "bad-ts", "level": "info", "message": "bad ts"}\n')
+
+        results = z2m_client_with_logs.get_logs_from_file(minutes_back=60)
+        assert len(results) == 1
+        assert results[0]["message"] == "valid"
 
 
 class TestZ2MClientLogPersistence:

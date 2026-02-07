@@ -400,7 +400,22 @@ async def analyze_logs(
     ctx = mcp.get_context()
     z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
 
-    entries = z2m.get_logs(minutes_back=minutes_back, level=level)
+    file_entries = z2m.get_logs_from_file(minutes_back=minutes_back, level=level)
+    buffer_entries = z2m.get_logs(minutes_back=minutes_back, level=level)
+
+    # Deduplicate — collector file and in-session buffer may both capture
+    # the same MQTT log message with slightly different timestamps.
+    # Truncate timestamp to the second for dedup to handle clock skew.
+    seen: set[tuple[str, str, str]] = set()
+    entries: list[dict[str, str]] = []
+    for entry in file_entries + buffer_entries:
+        ts = entry.get("timestamp", "")[:19]  # "YYYY-MM-DDTHH:MM:SS"
+        key = (ts, entry.get("level", ""), entry.get("message", ""))
+        if key not in seen:
+            seen.add(key)
+            entries.append(entry)
+
+    entries.sort(key=lambda e: e.get("timestamp", ""))
 
     error_count = sum(1 for e in entries if e.get("level") == "error")
     warning_count = sum(1 for e in entries if e.get("level") == "warn")
@@ -412,9 +427,10 @@ async def analyze_logs(
         "total_in_buffer": z2m.get_log_buffer_size(),
         "log_file": z2m.get_log_file_path(),
         "note": (
-            f"Showing {len(entries)} entries from last {minutes_back} minutes. "
-            f"In-memory buffer holds up to {z2m.get_log_buffer_size()} of the last "
-            f"1000 messages. Full history is in the JSONL log file."
+            f"Showing {len(entries)} entries from last {minutes_back} minutes "
+            f"(merged from persistent log file and in-session buffer). "
+            f"In-memory buffer holds {z2m.get_log_buffer_size()} of the last "
+            f"1000 messages."
         ),
     }
 

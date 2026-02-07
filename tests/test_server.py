@@ -278,7 +278,7 @@ class TestAnalyzeLogs:
         assert "note" in result
 
     @pytest.mark.asyncio
-    async def test_analyze_logs_with_entries(self, z2m: Z2MClient) -> None:
+    async def test_analyze_logs_with_buffer_entries(self, z2m: Z2MClient) -> None:
         z2m._process_log_message(json.dumps({"level": "error", "message": "err1"}))
         z2m._process_log_message(json.dumps({"level": "warn", "message": "warn1"}))
         z2m._process_log_message(json.dumps({"level": "info", "message": "info1"}))
@@ -301,6 +301,56 @@ class TestAnalyzeLogs:
         assert result["error_count"] == 1
         assert len(result["entries"]) == 1
         assert result["entries"][0]["level"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_analyze_logs_merges_file_and_buffer(self, z2m: Z2MClient) -> None:
+        """Entries from both file and buffer are included in results."""
+        file_entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "level": "error", "message": "from file"}
+        buffer_entry_msg = {"level": "warn", "message": "from buffer"}
+
+        z2m.get_logs_from_file = MagicMock(return_value=[file_entry])
+        z2m._process_log_message(json.dumps(buffer_entry_msg))
+
+        result = await analyze_logs(minutes_back=60)
+
+        messages = [e["message"] for e in result["entries"]]
+        assert "from file" in messages
+        assert "from buffer" in messages
+        assert result["error_count"] == 1
+        assert result["warning_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_analyze_logs_deduplicates(self, z2m: Z2MClient) -> None:
+        """Identical entries from file and buffer appear only once."""
+        ts = datetime.now(timezone.utc).isoformat()
+        entry = {"timestamp": ts, "level": "info", "message": "duplicate msg"}
+
+        # Return the same entry from both sources
+        z2m.get_logs_from_file = MagicMock(return_value=[dict(entry)])
+        z2m._log_buffer.append(dict(entry))
+
+        result = await analyze_logs(minutes_back=60)
+
+        assert len(result["entries"]) == 1
+        assert result["entries"][0]["message"] == "duplicate msg"
+
+    @pytest.mark.asyncio
+    async def test_analyze_logs_deduplicates_with_subsecond_skew(self, z2m: Z2MClient) -> None:
+        """Entries with same second but different sub-second timestamps are deduped."""
+        base = datetime.now(timezone.utc).replace(microsecond=0)
+        ts_file = base.isoformat()
+        ts_buffer = base.replace(microsecond=500000).isoformat()
+
+        file_entry = {"timestamp": ts_file, "level": "warn", "message": "skewed msg"}
+        buffer_entry = {"timestamp": ts_buffer, "level": "warn", "message": "skewed msg"}
+
+        z2m.get_logs_from_file = MagicMock(return_value=[file_entry])
+        z2m._log_buffer.append(buffer_entry)
+
+        result = await analyze_logs(minutes_back=60)
+
+        msgs = [e["message"] for e in result["entries"] if e["message"] == "skewed msg"]
+        assert len(msgs) == 1
 
 
 # ---------------------------------------------------------------------------

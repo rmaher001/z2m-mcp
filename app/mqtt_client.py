@@ -164,17 +164,20 @@ class Z2MClient:
         self._log_buffer.append(entry)
 
         if self._log_writer:
-            line = json.dumps(entry, separators=(",", ":"))
-            record = logging.LogRecord(
-                name="z2m",
-                level=logging.INFO,
-                pathname="",
-                lineno=0,
-                msg=line,
-                args=(),
-                exc_info=None,
-            )
-            self._log_writer.emit(record)
+            try:
+                line = json.dumps(entry, separators=(",", ":"))
+                record = logging.LogRecord(
+                    name="z2m",
+                    level=logging.INFO,
+                    pathname="",
+                    lineno=0,
+                    msg=line,
+                    args=(),
+                    exc_info=None,
+                )
+                self._log_writer.emit(record)
+            except Exception:
+                logger.exception("Failed to write log entry to file")
 
     def _process_device_state(self, device_name: str, payload: str) -> None:
         """Update device state from individual device topic."""
@@ -259,6 +262,60 @@ class Z2MClient:
                 continue
 
             results.append(entry)
+
+        return results
+
+    def get_logs_from_file(
+        self,
+        minutes_back: int = 60,
+        level: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Read log entries from the persistent JSONL file.
+
+        Used to retrieve logs written by the collector sidecar container.
+
+        Args:
+            minutes_back: Only return entries from the last N minutes.
+            level: Filter by log level (error, warn, info, debug).
+
+        Returns:
+            List of log entry dicts with timestamp, level, message.
+        """
+        if not self._log_file_path:
+            return []
+
+        now = datetime.now(timezone.utc)
+        results = []
+
+        try:
+            f = open(self._log_file_path, encoding="utf-8")
+        except FileNotFoundError:
+            return []
+
+        with f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Filter by time
+                try:
+                    ts = datetime.fromisoformat(entry["timestamp"])
+                    age_minutes = (now - ts).total_seconds() / 60
+                    if age_minutes > minutes_back:
+                        continue
+                except (ValueError, KeyError):
+                    continue
+
+                # Filter by level
+                if level and entry.get("level") != level:
+                    continue
+
+                results.append(entry)
 
         return results
 
