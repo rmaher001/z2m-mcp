@@ -352,6 +352,29 @@ class TestZ2MClientLogPersistence:
         assert path.endswith("z2m.jsonl")
 
 
+class TestBuildIeeeMap:
+    def test_build_ieee_map(self, z2m_client: Z2MClient) -> None:
+        z2m_client._process_devices_message(json.dumps(SAMPLE_DEVICES_LIST))
+
+        ieee_map = z2m_client.build_ieee_map()
+
+        assert ieee_map["0x00158d0001234567"] == "Living Room Plug"
+        assert ieee_map["0x00158d0009876543"] == "Kitchen Sensor"
+        assert ieee_map["0x00124b002345abcd"] == "Coordinator"
+
+    def test_build_ieee_map_empty(self, z2m_client: Z2MClient) -> None:
+        ieee_map = z2m_client.build_ieee_map()
+        assert ieee_map == {}
+
+    def test_build_ieee_map_skips_missing_fields(self, z2m_client: Z2MClient) -> None:
+        """Devices without ieee_address are skipped."""
+        devices = [{"friendly_name": "NoIEEE", "network_address": 123}]
+        z2m_client._process_devices_message(json.dumps(devices))
+
+        ieee_map = z2m_client.build_ieee_map()
+        assert ieee_map == {}
+
+
 class TestCleanupOldLogs:
     def test_deletes_files_older_than_retention(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
         """Files with mtime older than retention_days are deleted."""

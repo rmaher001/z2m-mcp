@@ -407,6 +407,16 @@ class Z2MClient:
         finally:
             self._response_events.pop(response_topic, None)
 
+    def build_ieee_map(self) -> dict[str, str]:
+        """Build ieee_address -> friendly_name map from cached devices."""
+        result: dict[str, str] = {}
+        for dev in self._devices:
+            ieee = dev.get("ieee_address")
+            name = dev.get("friendly_name")
+            if ieee and name:
+                result[ieee] = name
+        return result
+
     async def publish(self, topic: str, payload: dict[str, Any] | str) -> None:
         """Publish a message to a topic."""
         if not self._client:

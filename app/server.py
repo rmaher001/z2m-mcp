@@ -11,6 +11,13 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from app.config import load_config
+from app.debug_parser import (
+    aggregate_routes,
+    aggregate_signal_stats,
+    analyze_debug_entries,
+    parse_incoming_message,
+    parse_route_record,
+)
 from app.mqtt_client import Z2MClient
 
 logger = logging.getLogger(__name__)
@@ -440,6 +447,180 @@ async def analyze_logs(
             f"In-memory buffer holds {z2m.get_log_buffer_size()} of the last "
             f"1000 messages."
         ),
+    }
+
+
+_NO_DEBUG_HINT = (
+    "No debug log entries found. To enable debug logging in Z2M, set "
+    "'log_debug_to_mqtt_frontend: true' in the Z2M advanced configuration, "
+    "then set the log level to debug."
+)
+
+
+@mcp.tool()
+async def analyze_debug_logs(minutes_back: int = 60) -> dict[str, Any]:
+    """Analyze Z2M debug logs for network health insights.
+
+    Parses debug-level log entries to provide message category counts,
+    route errors with resolved device names, weak signal devices,
+    and routing instability indicators.
+
+    Requires Z2M debug logging enabled (log_debug_to_mqtt_frontend: true).
+
+    Args:
+        minutes_back: Number of minutes of debug logs to analyze (default: 60).
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    ieee_map = z2m.build_ieee_map()
+
+    debug_entries = z2m.get_logs_from_file(minutes_back=minutes_back, level="debug")
+
+    # Also fetch non-debug entries for route errors (logged at error/warn level)
+    all_entries = z2m.get_logs_from_file(minutes_back=minutes_back)
+    non_debug = [e for e in all_entries if e.get("level") != "debug"]
+
+    combined = debug_entries + non_debug
+
+    if not combined:
+        return {
+            "total_entries": 0,
+            "categories": {
+                "route_records": 0,
+                "incoming_messages": 0,
+                "route_errors": 0,
+                "uart_noise": 0,
+                "other": 0,
+            },
+            "route_errors": [],
+            "weak_signal_devices": [],
+            "routing_instability": [],
+            "note": _NO_DEBUG_HINT,
+        }
+
+    result = analyze_debug_entries(combined, ieee_map)
+    result["minutes_back"] = minutes_back
+    return result
+
+
+@mcp.tool()
+async def get_routing_table(
+    device: str | None = None,
+    minutes_back: int = 60,
+) -> dict[str, Any]:
+    """Get per-device routing paths from debug log route records.
+
+    Shows current relay path through the mesh (resolved to friendly names),
+    all observed paths with frequency counts, and path change count as
+    an instability indicator.
+
+    Requires Z2M debug logging enabled (log_debug_to_mqtt_frontend: true).
+
+    Args:
+        device: Optional device friendly_name to filter results.
+        minutes_back: Number of minutes of debug logs to analyze (default: 60).
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    ieee_map = z2m.build_ieee_map()
+
+    entries = z2m.get_logs_from_file(minutes_back=minutes_back, level="debug")
+
+    if not entries:
+        return {
+            "routes": {},
+            "note": _NO_DEBUG_HINT,
+        }
+
+    records = []
+    for entry in entries:
+        rec = parse_route_record(entry.get("timestamp", ""), entry.get("message", ""))
+        if rec:
+            records.append(rec)
+
+    routes = aggregate_routes(records, ieee_map)
+
+    if device:
+        routes = {k: v for k, v in routes.items() if k == device}
+
+    # Summary stats
+    direct_count = sum(1 for r in routes.values() if r["current_path"] == ["(direct)"])
+    relayed_count = len(routes) - direct_count
+    all_relays: dict[str, int] = {}
+    for data in routes.values():
+        for path_key, count in data["observed_paths"].items():
+            if path_key != "(direct)":
+                for relay in path_key.split(" -> "):
+                    all_relays[relay] = all_relays.get(relay, 0) + count
+
+    top_routers = sorted(all_relays.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return {
+        "routes": routes,
+        "device_count": len(routes),
+        "direct_devices": direct_count,
+        "relayed_devices": relayed_count,
+        "top_routers": [{"name": name, "relay_count": cnt} for name, cnt in top_routers],
+        "minutes_back": minutes_back,
+    }
+
+
+@mcp.tool()
+async def get_signal_history(
+    device: str | None = None,
+    minutes_back: int = 60,
+) -> dict[str, Any]:
+    """Get per-device LQI/RSSI signal history from debug logs.
+
+    Shows min/max/avg LQI and RSSI per device, sample count, sorted
+    weakest-first. Combines data from incoming message handlers and
+    route records.
+
+    Requires Z2M debug logging enabled (log_debug_to_mqtt_frontend: true).
+
+    Args:
+        device: Optional device friendly_name to filter results.
+        minutes_back: Number of minutes of debug logs to analyze (default: 60).
+    """
+    ctx = mcp.get_context()
+    z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
+
+    ieee_map = z2m.build_ieee_map()
+
+    entries = z2m.get_logs_from_file(minutes_back=minutes_back, level="debug")
+
+    if not entries:
+        return {
+            "devices": {},
+            "note": _NO_DEBUG_HINT,
+        }
+
+    messages = []
+    records = []
+    for entry in entries:
+        ts = entry.get("timestamp", "")
+        msg = entry.get("message", "")
+
+        rec = parse_route_record(ts, msg)
+        if rec:
+            records.append(rec)
+            continue
+
+        im = parse_incoming_message(ts, msg)
+        if im:
+            messages.append(im)
+
+    signals = aggregate_signal_stats(messages, records, ieee_map)
+
+    if device:
+        signals = {k: v for k, v in signals.items() if k == device}
+
+    return {
+        "devices": signals,
+        "device_count": len(signals),
+        "minutes_back": minutes_back,
     }
 
 

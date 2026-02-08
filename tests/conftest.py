@@ -141,3 +141,38 @@ SAMPLE_DEVICES_LIST = [
     SAMPLE_DEVICE_ROUTER,
     SAMPLE_DEVICE_END_DEVICE,
 ]
+
+
+# ---------------------------------------------------------------------------
+# Debug log samples (from Z2M with log_debug_to_mqtt_frontend: true)
+# ---------------------------------------------------------------------------
+
+SAMPLE_DEBUG_ROUTE_RECORD = (
+    "zh:ember:ezsp: ezspIncomingRouteRecordHandler: source=12345 "
+    "sourceEui=0x00158d0001234567 lastHopLqi=180 lastHopRssi=-45 "
+    "relayCount=2 relayList=100,200"
+)
+
+SAMPLE_DEBUG_ROUTE_RECORD_DIRECT = (
+    "zh:ember:ezsp: ezspIncomingRouteRecordHandler: source=54321 "
+    "sourceEui=0x00158d0009876543 lastHopLqi=120 lastHopRssi=-60 "
+    "relayCount=0 relayList="
+)
+
+SAMPLE_DEBUG_INCOMING_MSG = (
+    'zh:ember:ezsp: ezspIncomingMessageHandler: type=4 '
+    '"apsFrame":{"profileId":260,"clusterId":6,"sourceEndpoint":1,'
+    '"destinationEndpoint":1,"options":0,"groupId":0} '
+    '"senderShortId":12345 '
+    '"lastHopLqi":155, "lastHopRssi":-50'
+)
+
+SAMPLE_DEBUG_ROUTE_ERROR = (
+    "Received network/route error routeDiscoveryFailed for "
+    '"0x00158d0001234567"'
+)
+
+SAMPLE_DEBUG_UART_NOISE = (
+    "zh:ember:uart: --> [readFrame] Frame(10): "
+    "feff0053ab89002180"
+)

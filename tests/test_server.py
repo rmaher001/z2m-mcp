@@ -11,13 +11,16 @@ import pytest
 from app.config import MQTTConfig
 from app.mqtt_client import Z2MClient
 from app.server import (
+    analyze_debug_logs,
+    analyze_logs,
     get_bridge_info,
     get_device_health,
     get_device_info,
     get_network_map,
+    get_routing_table,
+    get_signal_history,
     list_devices,
     list_weak_devices,
-    analyze_logs,
     permit_join,
     reconfigure_device,
     rename_device,
@@ -27,6 +30,10 @@ from app.server import (
 )
 from tests.conftest import (
     SAMPLE_BRIDGE_INFO,
+    SAMPLE_DEBUG_INCOMING_MSG,
+    SAMPLE_DEBUG_ROUTE_ERROR,
+    SAMPLE_DEBUG_ROUTE_RECORD,
+    SAMPLE_DEBUG_UART_NOISE,
     SAMPLE_DEVICES_LIST,
     SAMPLE_DEVICE_END_DEVICE,
     SAMPLE_DEVICE_ROUTER,
@@ -351,6 +358,121 @@ class TestAnalyzeLogs:
 
         msgs = [e["message"] for e in result["entries"] if e["message"] == "skewed msg"]
         assert len(msgs) == 1
+
+
+class TestAnalyzeDebugLogs:
+    @pytest.mark.asyncio
+    async def test_returns_categories(self, z2m: Z2MClient) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        entries = [
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_ROUTE_RECORD},
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_INCOMING_MSG},
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_UART_NOISE},
+        ]
+        z2m.get_logs_from_file = MagicMock(return_value=entries)
+
+        result = await analyze_debug_logs(minutes_back=60)
+
+        assert result["total_entries"] == 3
+        assert result["categories"]["route_records"] == 1
+        assert result["categories"]["incoming_messages"] == 1
+        assert result["categories"]["uart_noise"] == 1
+
+    @pytest.mark.asyncio
+    async def test_includes_route_errors(self, z2m: Z2MClient) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        debug_entries = [
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_ROUTE_RECORD},
+        ]
+        error_entries = [
+            {"timestamp": now, "level": "error", "message": SAMPLE_DEBUG_ROUTE_ERROR},
+        ]
+        z2m.get_logs_from_file = MagicMock(side_effect=[debug_entries, error_entries])
+
+        result = await analyze_debug_logs(minutes_back=60)
+
+        assert result["categories"]["route_errors"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_no_debug_entries_returns_hint(self, z2m: Z2MClient) -> None:
+        z2m.get_logs_from_file = MagicMock(return_value=[])
+
+        result = await analyze_debug_logs(minutes_back=60)
+
+        assert "log_debug_to_mqtt_frontend" in result["note"]
+
+
+class TestGetRoutingTable:
+    @pytest.mark.asyncio
+    async def test_returns_routing_data(self, z2m: Z2MClient) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        entries = [
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_ROUTE_RECORD},
+        ]
+        z2m.get_logs_from_file = MagicMock(return_value=entries)
+
+        result = await get_routing_table(minutes_back=60)
+
+        assert "routes" in result
+        assert len(result["routes"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_filter_by_device(self, z2m: Z2MClient) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        entries = [
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_ROUTE_RECORD},
+        ]
+        z2m.get_logs_from_file = MagicMock(return_value=entries)
+
+        result = await get_routing_table(device="Living Room Plug", minutes_back=60)
+
+        assert len(result["routes"]) == 1
+        assert "Living Room Plug" in result["routes"]
+
+    @pytest.mark.asyncio
+    async def test_no_debug_entries_returns_hint(self, z2m: Z2MClient) -> None:
+        z2m.get_logs_from_file = MagicMock(return_value=[])
+
+        result = await get_routing_table(minutes_back=60)
+
+        assert "log_debug_to_mqtt_frontend" in result["note"]
+
+
+class TestGetSignalHistory:
+    @pytest.mark.asyncio
+    async def test_returns_signal_data(self, z2m: Z2MClient) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        entries = [
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_INCOMING_MSG},
+        ]
+        z2m.get_logs_from_file = MagicMock(return_value=entries)
+
+        result = await get_signal_history(minutes_back=60)
+
+        assert "devices" in result
+        assert len(result["devices"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_filter_by_device(self, z2m: Z2MClient) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        entries = [
+            {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_INCOMING_MSG},
+        ]
+        z2m.get_logs_from_file = MagicMock(return_value=entries)
+
+        # Incoming messages are keyed by raw network address
+        result = await get_signal_history(device="12345", minutes_back=60)
+
+        assert len(result["devices"]) == 1
+        assert "12345" in result["devices"]
+
+    @pytest.mark.asyncio
+    async def test_no_debug_entries_returns_hint(self, z2m: Z2MClient) -> None:
+        z2m.get_logs_from_file = MagicMock(return_value=[])
+
+        result = await get_signal_history(minutes_back=60)
+
+        assert "log_debug_to_mqtt_frontend" in result["note"]
 
 
 # ---------------------------------------------------------------------------
