@@ -30,7 +30,7 @@ async def lifespan(server: FastMCP):
         await z2m.stop()
 
 
-mcp = FastMCP("Z2M-MCP", lifespan=lifespan)
+mcp = FastMCP("Z2M-MCP", host="0.0.0.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------

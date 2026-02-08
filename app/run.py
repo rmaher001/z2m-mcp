@@ -1,10 +1,13 @@
 """CLI entry point for uvx compatibility."""
 
+import os
+
 from app.server import mcp
 
 
 def main() -> None:
-    mcp.run()
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":
