@@ -23,6 +23,8 @@ class LogConfig:
     dir: str
     max_size_mb: int
     backup_count: int
+    retention_days: int
+    max_total_mb: int
 
 
 @dataclass(frozen=True)
@@ -75,10 +77,28 @@ def load_config() -> AppConfig:
     except ValueError:
         raise ValueError(f"LOG_BACKUP_COUNT must be a valid integer, got '{backup_count_str}'")
 
+    retention_days_str = os.environ.get("LOG_RETENTION_DAYS", "7")
+    try:
+        retention_days = int(retention_days_str)
+    except ValueError:
+        raise ValueError(f"LOG_RETENTION_DAYS must be a valid integer, got '{retention_days_str}'")
+    if retention_days < 0:
+        raise ValueError(f"LOG_RETENTION_DAYS must be >= 0, got {retention_days}")
+
+    max_total_mb_str = os.environ.get("LOG_MAX_TOTAL_MB", "100")
+    try:
+        max_total_mb = int(max_total_mb_str)
+    except ValueError:
+        raise ValueError(f"LOG_MAX_TOTAL_MB must be a valid integer, got '{max_total_mb_str}'")
+    if max_total_mb < 0:
+        raise ValueError(f"LOG_MAX_TOTAL_MB must be >= 0, got {max_total_mb}")
+
     log = LogConfig(
         dir=os.environ.get("LOG_DIR", "/data/logs"),
         max_size_mb=max_size_mb,
         backup_count=backup_count,
+        retention_days=retention_days,
+        max_total_mb=max_total_mb,
     )
 
     timezone = os.environ.get("TZ", "UTC")

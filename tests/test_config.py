@@ -29,6 +29,8 @@ class TestLoadConfig:
         assert config.log.dir == "/data/logs"
         assert config.log.max_size_mb == 10
         assert config.log.backup_count == 3
+        assert config.log.retention_days == 7
+        assert config.log.max_total_mb == 100
         assert config.timezone == "UTC"
 
     def test_loads_custom_values(self) -> None:
@@ -39,6 +41,8 @@ class TestLoadConfig:
             "LOG_DIR": "/tmp/z2m-logs",
             "LOG_MAX_SIZE_MB": "25",
             "LOG_BACKUP_COUNT": "5",
+            "LOG_RETENTION_DAYS": "14",
+            "LOG_MAX_TOTAL_MB": "200",
             "TZ": "America/Los_Angeles",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -49,6 +53,8 @@ class TestLoadConfig:
         assert config.log.dir == "/tmp/z2m-logs"
         assert config.log.max_size_mb == 25
         assert config.log.backup_count == 5
+        assert config.log.retention_days == 14
+        assert config.log.max_total_mb == 200
         assert config.timezone == "America/Los_Angeles"
 
     def test_missing_mqtt_host_raises(self) -> None:
@@ -96,6 +102,30 @@ class TestLoadConfig:
         env = {**VALID_ENV, "LOG_BACKUP_COUNT": "xyz"}
         with patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError, match="LOG_BACKUP_COUNT must be a valid integer"):
+                load_config()
+
+    def test_invalid_log_retention_days(self) -> None:
+        env = {**VALID_ENV, "LOG_RETENTION_DAYS": "abc"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="LOG_RETENTION_DAYS must be a valid integer"):
+                load_config()
+
+    def test_invalid_log_max_total_mb(self) -> None:
+        env = {**VALID_ENV, "LOG_MAX_TOTAL_MB": "abc"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="LOG_MAX_TOTAL_MB must be a valid integer"):
+                load_config()
+
+    def test_negative_log_retention_days(self) -> None:
+        env = {**VALID_ENV, "LOG_RETENTION_DAYS": "-1"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="LOG_RETENTION_DAYS must be >= 0"):
+                load_config()
+
+    def test_negative_log_max_total_mb(self) -> None:
+        env = {**VALID_ENV, "LOG_MAX_TOTAL_MB": "-5"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="LOG_MAX_TOTAL_MB must be >= 0"):
                 load_config()
 
     def test_config_is_frozen(self) -> None:

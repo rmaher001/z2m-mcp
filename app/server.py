@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -14,20 +15,27 @@ from app.mqtt_client import Z2MClient
 
 logger = logging.getLogger(__name__)
 
+_z2m: Z2MClient | None = None
+
+
+def _shutdown_client() -> None:
+    """Close the log file handler on process exit."""
+    if _z2m is not None and _z2m._log_writer is not None:
+        _z2m._log_writer.close()
+
+
+atexit.register(_shutdown_client)
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    """Start MQTT client on server startup."""
-    config = load_config()
-
-    z2m = Z2MClient(config.mqtt, log_config=config.log)
-
-    await z2m.start()
-
-    try:
-        yield {"z2m": z2m}
-    finally:
-        await z2m.stop()
+    """Start MQTT client on server startup (singleton — survives across sessions)."""
+    global _z2m
+    if _z2m is None:
+        config = load_config()
+        _z2m = Z2MClient(config.mqtt, log_config=config.log)
+        await _z2m.start()
+    yield {"z2m": _z2m}
 
 
 mcp = FastMCP("Z2M-MCP", host="0.0.0.0", lifespan=lifespan)

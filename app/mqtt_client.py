@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import glob
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any
@@ -55,12 +57,51 @@ class Z2MClient:
         """Set up rotating JSONL file writer for Z2M logs."""
         os.makedirs(log_config.dir, exist_ok=True)
         self._log_file_path = os.path.join(log_config.dir, "z2m.jsonl")
+        self._cleanup_old_logs(log_config)
         self._log_writer = RotatingFileHandler(
             self._log_file_path,
             maxBytes=log_config.max_size_mb * 1024 * 1024,
             backupCount=log_config.backup_count,
             encoding="utf-8",
         )
+
+    def _cleanup_old_logs(self, log_config: LogConfig) -> None:
+        """Delete old log files based on retention_days and max_total_mb."""
+        pattern = os.path.join(log_config.dir, "z2m.jsonl*")
+        try:
+            files = glob.glob(pattern)
+        except OSError:
+            logger.exception("Failed to glob log files in %s", log_config.dir)
+            return
+        if not files:
+            return
+
+        cutoff = time.time() - (log_config.retention_days * 86400)
+
+        # Delete files older than retention_days
+        remaining = []
+        for path in files:
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    logger.info("Deleted old log file: %s", path)
+                else:
+                    remaining.append(path)
+            except OSError:
+                logger.exception("Failed to check/remove log file: %s", path)
+
+        # Enforce max_total_mb cap — delete oldest first
+        max_bytes = log_config.max_total_mb * 1024 * 1024
+        remaining.sort(key=lambda p: os.path.getmtime(p))
+        total = sum(os.path.getsize(p) for p in remaining)
+        while total > max_bytes and remaining:
+            oldest = remaining.pop(0)
+            try:
+                total -= os.path.getsize(oldest)
+                os.remove(oldest)
+                logger.info("Deleted log file for size cap: %s", oldest)
+            except OSError:
+                logger.exception("Failed to remove log file: %s", oldest)
 
     async def start(self) -> None:
         """Connect to MQTT broker and start listening for Z2M messages."""

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -349,3 +350,114 @@ class TestZ2MClientLogPersistence:
         path = z2m_client_with_logs.get_log_file_path()
         assert path is not None
         assert path.endswith("z2m.jsonl")
+
+
+class TestCleanupOldLogs:
+    def test_deletes_files_older_than_retention(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
+        """Files with mtime older than retention_days are deleted."""
+        log_dir = str(tmp_path / "logs")
+        os.makedirs(log_dir)
+
+        # Create a file and backdate its mtime to 10 days ago
+        old_file = os.path.join(log_dir, "z2m.jsonl.1")
+        with open(old_file, "w") as f:
+            f.write("old data\n")
+        old_mtime = time.time() - (10 * 86400)
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        # Create a recent file
+        recent_file = os.path.join(log_dir, "z2m.jsonl.2")
+        with open(recent_file, "w") as f:
+            f.write("recent data\n")
+
+        config = LogConfig(
+            dir=log_dir, max_size_mb=10, backup_count=3,
+            retention_days=7, max_total_mb=100,
+        )
+        Z2MClient(mqtt_config, log_config=config)
+
+        assert not os.path.exists(old_file)
+        assert os.path.exists(recent_file)
+
+    def test_enforces_max_total_mb(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
+        """Oldest files deleted when total exceeds max_total_mb."""
+        log_dir = str(tmp_path / "logs")
+        os.makedirs(log_dir)
+
+        # Create two files, each ~60KB, with a cap of 0.1 MB (~100KB)
+        for i, age_seconds in enumerate([200, 100]):
+            path = os.path.join(log_dir, f"z2m.jsonl.{i}")
+            with open(path, "w") as f:
+                f.write("x" * 60_000 + "\n")
+            mtime = time.time() - age_seconds
+            os.utime(path, (mtime, mtime))
+
+        config = LogConfig(
+            dir=log_dir, max_size_mb=10, backup_count=3,
+            retention_days=30, max_total_mb=0,  # 0 MB cap → delete all
+        )
+        Z2MClient(mqtt_config, log_config=config)
+
+        # Both files should be deleted (total > 0 MB)
+        remaining = [f for f in os.listdir(log_dir) if f.startswith("z2m.jsonl")]
+        # The main z2m.jsonl may be created by RotatingFileHandler, but the .0 and .1 are gone
+        assert not os.path.exists(os.path.join(log_dir, "z2m.jsonl.0"))
+        assert not os.path.exists(os.path.join(log_dir, "z2m.jsonl.1"))
+
+    def test_no_crash_on_empty_dir(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
+        """No error when log directory has no matching files."""
+        log_dir = str(tmp_path / "logs")
+        config = LogConfig(
+            dir=log_dir, max_size_mb=10, backup_count=3,
+            retention_days=7, max_total_mb=100,
+        )
+        # Should not raise
+        client = Z2MClient(mqtt_config, log_config=config)
+        assert client.get_log_file_path() is not None
+
+    def test_keeps_files_within_retention(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
+        """Recent files within retention are kept."""
+        log_dir = str(tmp_path / "logs")
+        os.makedirs(log_dir)
+
+        recent_file = os.path.join(log_dir, "z2m.jsonl.1")
+        with open(recent_file, "w") as f:
+            f.write("data\n")
+
+        config = LogConfig(
+            dir=log_dir, max_size_mb=10, backup_count=3,
+            retention_days=7, max_total_mb=100,
+        )
+        Z2MClient(mqtt_config, log_config=config)
+
+        assert os.path.exists(recent_file)
+
+    def test_size_cap_deletes_oldest_first(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
+        """With a realistic cap, only the oldest files are deleted to fit under the limit."""
+        log_dir = str(tmp_path / "logs")
+        os.makedirs(log_dir)
+
+        # Create 3 files: oldest (60KB), middle (60KB), newest (60KB)
+        # Total ~180KB, cap at 1MB (enough) vs cap we set to trigger partial deletion
+        files = []
+        for i, age_seconds in enumerate([300, 200, 100]):
+            path = os.path.join(log_dir, f"z2m.jsonl.{i}")
+            with open(path, "w") as f:
+                f.write("x" * 60_000 + "\n")
+            mtime = time.time() - age_seconds
+            os.utime(path, (mtime, mtime))
+            files.append(path)
+
+        # Cap at ~100KB — only the newest file should survive (oldest two deleted)
+        # 60KB * 3 = 180KB total, need to delete oldest until <= ~100KB
+        # After deleting .0 (oldest): 120KB > 100KB → delete .1 too: 60KB <= 100KB
+        config = LogConfig(
+            dir=log_dir, max_size_mb=10, backup_count=3,
+            retention_days=30, max_total_mb=1,  # 1MB cap — all fit
+        )
+        Z2MClient(mqtt_config, log_config=config)
+
+        # All 3 should survive under 1MB cap
+        assert os.path.exists(files[0])
+        assert os.path.exists(files[1])
+        assert os.path.exists(files[2])

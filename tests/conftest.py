@@ -23,6 +23,8 @@ def log_config(tmp_path) -> LogConfig:
         dir=str(tmp_path / "logs"),
         max_size_mb=10,
         backup_count=3,
+        retention_days=7,
+        max_total_mb=100,
     )
 
 
