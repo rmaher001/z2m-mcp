@@ -265,7 +265,7 @@ class TestAggregateSignalStats:
 
         result = aggregate_signal_stats(messages, [], ADDR_INFO, IEEE_MAP)
 
-        key = "Living Room Plug [addr:12345, Router]"
+        key = "Living Room Plug"
         assert key in result
         dev = result[key]
         assert dev["lqi_min"] == 120
@@ -277,7 +277,7 @@ class TestAggregateSignalStats:
         assert dev["sample_count"] == 3
 
     def test_includes_route_record_signals(self) -> None:
-        """Route records use IEEE-resolved names, incoming messages use formatted address."""
+        """Incoming messages and route records merge under the same device key."""
         messages = [
             IncomingMessage("t1", 12345, 150, -50),
         ]
@@ -287,12 +287,10 @@ class TestAggregateSignalStats:
 
         result = aggregate_signal_stats(messages, records, ADDR_INFO, IEEE_MAP)
 
-        # Incoming message keyed by formatted address, route record by IEEE name
-        msg_key = "Living Room Plug [addr:12345, Router]"
-        assert msg_key in result
+        # Both sources merge under the bare friendly name
         assert "Living Room Plug" in result
-        assert result[msg_key]["sample_count"] == 1
-        assert result["Living Room Plug"]["sample_count"] == 1
+        assert len(result) == 1
+        assert result["Living Room Plug"]["sample_count"] == 2
 
     def test_sorted_weakest_first(self) -> None:
         messages = [
@@ -304,8 +302,8 @@ class TestAggregateSignalStats:
 
         keys = list(result.keys())
         # EndDevice key comes first (weaker signal)
-        assert "Kitchen Sensor" in keys[0]
-        assert "Living Room Plug" in keys[1]
+        assert keys[0] == "Kitchen Sensor"
+        assert keys[1] == "Living Room Plug"
 
     def test_empty_messages(self) -> None:
         result = aggregate_signal_stats([], [], ADDR_INFO, IEEE_MAP)
@@ -383,10 +381,9 @@ class TestAnalyzeDebugEntries:
         result = analyze_debug_entries(entries, ADDR_INFO, IEEE_MAP)
 
         assert len(result["weak_signal_devices"]) >= 1
-        # Now keyed by formatted address
+        # Keyed by bare friendly name
         weak_name = result["weak_signal_devices"][0]["device"]
-        assert "Kitchen Sensor" in weak_name
-        assert "addr:54321" in weak_name
+        assert weak_name == "Kitchen Sensor"
 
     def test_routing_instability(self) -> None:
         """Devices with >= 3 path changes appear in routing_instability."""

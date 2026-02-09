@@ -201,8 +201,8 @@ def aggregate_signal_stats(
 ) -> dict[str, dict[str, Any]]:
     """Aggregate signal stats (LQI/RSSI) per device, sorted weakest first.
 
-    Incoming messages are keyed by best-effort resolved name (with raw address).
-    Route records are keyed by IEEE-resolved friendly name (permanent).
+    Both incoming messages and route records are keyed by bare friendly name
+    so samples from both sources merge under a single device entry.
     """
     if not messages and not records:
         return {}
@@ -211,7 +211,8 @@ def aggregate_signal_stats(
     samples: dict[str, list[tuple[int, int]]] = {}
 
     for msg in messages:
-        name = _format_relay(msg.sender_short_id, addr_info)
+        info = addr_info.get(msg.sender_short_id)
+        name = info["name"] if info else f"[addr:{msg.sender_short_id}]"
         samples.setdefault(name, []).append((msg.last_hop_lqi, msg.last_hop_rssi))
 
     for rec in records:
