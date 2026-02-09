@@ -375,6 +375,45 @@ class TestBuildIeeeMap:
         assert ieee_map == {}
 
 
+class TestBuildAddressInfoMap:
+    def test_build_address_info_map(self, z2m_client: Z2MClient) -> None:
+        z2m_client._process_devices_message(json.dumps(SAMPLE_DEVICES_LIST))
+
+        addr_info = z2m_client.build_address_info_map()
+
+        assert addr_info[12345] == {"name": "Living Room Plug", "type": "Router"}
+        assert addr_info[54321] == {"name": "Kitchen Sensor", "type": "EndDevice"}
+        assert addr_info[0] == {"name": "Coordinator", "type": "Coordinator"}
+
+    def test_build_address_info_map_empty(self, z2m_client: Z2MClient) -> None:
+        addr_info = z2m_client.build_address_info_map()
+        assert addr_info == {}
+
+    def test_build_address_info_map_skips_missing_fields(self, z2m_client: Z2MClient) -> None:
+        """Devices without network_address are skipped."""
+        devices = [{"friendly_name": "NoAddr", "type": "Router"}]
+        z2m_client._process_devices_message(json.dumps(devices))
+
+        addr_info = z2m_client.build_address_info_map()
+        assert addr_info == {}
+
+    def test_build_address_info_map_skips_missing_name(self, z2m_client: Z2MClient) -> None:
+        """Devices without friendly_name are skipped."""
+        devices = [{"network_address": 100, "type": "Router"}]
+        z2m_client._process_devices_message(json.dumps(devices))
+
+        addr_info = z2m_client.build_address_info_map()
+        assert addr_info == {}
+
+    def test_build_address_info_map_default_type(self, z2m_client: Z2MClient) -> None:
+        """Devices without type get 'Unknown' as default."""
+        devices = [{"friendly_name": "NoType", "network_address": 999}]
+        z2m_client._process_devices_message(json.dumps(devices))
+
+        addr_info = z2m_client.build_address_info_map()
+        assert addr_info[999] == {"name": "NoType", "type": "Unknown"}
+
+
 class TestCleanupOldLogs:
     def test_deletes_files_older_than_retention(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
         """Files with mtime older than retention_days are deleted."""

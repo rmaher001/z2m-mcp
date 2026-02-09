@@ -417,6 +417,21 @@ class Z2MClient:
                 result[ieee] = name
         return result
 
+    def build_address_info_map(self) -> dict[int, dict[str, str]]:
+        """Build network_address -> {name, type} map from cached devices.
+
+        Best-effort: network addresses are ephemeral. Callers should
+        display the raw address alongside the resolved name.
+        """
+        result: dict[int, dict[str, str]] = {}
+        for dev in self._devices:
+            addr = dev.get("network_address")
+            name = dev.get("friendly_name")
+            dev_type = dev.get("type", "Unknown")
+            if addr is not None and name:
+                result[addr] = {"name": name, "type": dev_type}
+        return result
+
     async def publish(self, topic: str, payload: dict[str, Any] | str) -> None:
         """Publish a message to a topic."""
         if not self._client:

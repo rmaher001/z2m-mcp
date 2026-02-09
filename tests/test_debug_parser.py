@@ -6,6 +6,7 @@ from app.debug_parser import (
     IncomingMessage,
     RouteError,
     RouteRecord,
+    _format_relay,
     aggregate_routes,
     aggregate_signal_stats,
     analyze_debug_entries,
@@ -23,12 +24,20 @@ from tests.conftest import (
 
 
 # ---------------------------------------------------------------------------
-# IEEE map used across tests
+# Maps used across tests
 # ---------------------------------------------------------------------------
 
 IEEE_MAP = {
     "0x00158d0001234567": "Living Room Plug",
     "0x00158d0009876543": "Kitchen Sensor",
+}
+
+ADDR_INFO: dict[int, dict[str, str]] = {
+    100: {"name": "Hallway Repeater", "type": "Router"},
+    200: {"name": "Garage Plug", "type": "Router"},
+    12345: {"name": "Living Room Plug", "type": "Router"},
+    54321: {"name": "Kitchen Sensor", "type": "EndDevice"},
+    9814: {"name": "master_bedroom_pir", "type": "EndDevice"},
 }
 
 
@@ -117,6 +126,26 @@ class TestParseRouteError:
 
 
 # ---------------------------------------------------------------------------
+# _format_relay
+# ---------------------------------------------------------------------------
+
+
+class TestFormatRelay:
+    def test_resolved_router(self) -> None:
+        assert _format_relay(100, ADDR_INFO) == "Hallway Repeater [addr:100, Router]"
+
+    def test_resolved_end_device(self) -> None:
+        result = _format_relay(9814, ADDR_INFO)
+        assert result == "master_bedroom_pir [addr:9814, EndDevice — likely reassigned]"
+
+    def test_unresolved_address(self) -> None:
+        assert _format_relay(88888, ADDR_INFO) == "[addr:88888]"
+
+    def test_empty_addr_info(self) -> None:
+        assert _format_relay(100, {}) == "[addr:100]"
+
+
+# ---------------------------------------------------------------------------
 # aggregate_routes
 # ---------------------------------------------------------------------------
 
@@ -135,16 +164,19 @@ class TestAggregateRoutes:
             ),
         ]
 
-        result = aggregate_routes(records, IEEE_MAP)
+        result = aggregate_routes(records, ADDR_INFO, IEEE_MAP)
 
         assert "Living Room Plug" in result
         dev = result["Living Room Plug"]
         assert dev["path_change_count"] == 0
         assert len(dev["observed_paths"]) == 1
-        path_key = "100 -> 200"
+        path_key = "Hallway Repeater [addr:100, Router] -> Garage Plug [addr:200, Router]"
         assert path_key in dev["observed_paths"]
         assert dev["observed_paths"][path_key] == 1
-        assert dev["current_path"] == [100, 200]
+        assert dev["current_path"] == [
+            "Hallway Repeater [addr:100, Router]",
+            "Garage Plug [addr:200, Router]",
+        ]
 
     def test_direct_device(self) -> None:
         records = [
@@ -159,7 +191,7 @@ class TestAggregateRoutes:
             ),
         ]
 
-        result = aggregate_routes(records, IEEE_MAP)
+        result = aggregate_routes(records, ADDR_INFO, IEEE_MAP)
 
         assert "Kitchen Sensor" in result
         dev = result["Kitchen Sensor"]
@@ -173,22 +205,35 @@ class TestAggregateRoutes:
             RouteRecord("t3", 12345, "0x00158d0001234567", 180, -45, 1, [100]),
         ]
 
-        result = aggregate_routes(records, IEEE_MAP)
+        result = aggregate_routes(records, ADDR_INFO, IEEE_MAP)
 
         dev = result["Living Room Plug"]
         assert dev["path_change_count"] == 2
         assert len(dev["observed_paths"]) == 2
 
-    def test_unknown_ieee_uses_raw(self) -> None:
+    def test_unknown_relay_uses_raw_addr(self) -> None:
         records = [
             RouteRecord("t1", 99999, "0xunknown", 100, -70, 1, [88888]),
         ]
 
-        result = aggregate_routes(records, IEEE_MAP)
+        result = aggregate_routes(records, ADDR_INFO, IEEE_MAP)
 
         assert "0xunknown" in result
         dev = result["0xunknown"]
-        assert dev["current_path"] == [88888]
+        assert dev["current_path"] == ["[addr:88888]"]
+
+    def test_end_device_relay_shows_reassigned(self) -> None:
+        """EndDevice in relay path gets 'likely reassigned' tag."""
+        records = [
+            RouteRecord("t1", 12345, "0x00158d0001234567", 180, -45, 1, [9814]),
+        ]
+
+        result = aggregate_routes(records, ADDR_INFO, IEEE_MAP)
+
+        dev = result["Living Room Plug"]
+        assert dev["current_path"] == [
+            "master_bedroom_pir [addr:9814, EndDevice — likely reassigned]",
+        ]
 
     def test_summary_stats(self) -> None:
         records = [
@@ -196,12 +241,12 @@ class TestAggregateRoutes:
             RouteRecord("t2", 54321, "0x00158d0009876543", 120, -60, 0, []),
         ]
 
-        result = aggregate_routes(records, IEEE_MAP)
+        result = aggregate_routes(records, ADDR_INFO, IEEE_MAP)
 
         assert len(result) == 2
 
     def test_empty_records(self) -> None:
-        result = aggregate_routes([], IEEE_MAP)
+        result = aggregate_routes([], ADDR_INFO, IEEE_MAP)
         assert result == {}
 
 
@@ -218,10 +263,11 @@ class TestAggregateSignalStats:
             IncomingMessage("t3", 12345, 120, -60),
         ]
 
-        result = aggregate_signal_stats(messages, [], IEEE_MAP)
+        result = aggregate_signal_stats(messages, [], ADDR_INFO, IEEE_MAP)
 
-        assert "12345" in result
-        dev = result["12345"]
+        key = "Living Room Plug [addr:12345, Router]"
+        assert key in result
+        dev = result[key]
         assert dev["lqi_min"] == 120
         assert dev["lqi_max"] == 180
         assert dev["lqi_avg"] == 150
@@ -231,7 +277,7 @@ class TestAggregateSignalStats:
         assert dev["sample_count"] == 3
 
     def test_includes_route_record_signals(self) -> None:
-        """Route records use IEEE-resolved names, incoming messages use raw addresses."""
+        """Route records use IEEE-resolved names, incoming messages use formatted address."""
         messages = [
             IncomingMessage("t1", 12345, 150, -50),
         ]
@@ -239,12 +285,13 @@ class TestAggregateSignalStats:
             RouteRecord("t2", 12345, "0x00158d0001234567", 180, -40, 1, [100]),
         ]
 
-        result = aggregate_signal_stats(messages, records, IEEE_MAP)
+        result = aggregate_signal_stats(messages, records, ADDR_INFO, IEEE_MAP)
 
-        # Incoming message keyed by raw address, route record by IEEE name
-        assert "12345" in result
+        # Incoming message keyed by formatted address, route record by IEEE name
+        msg_key = "Living Room Plug [addr:12345, Router]"
+        assert msg_key in result
         assert "Living Room Plug" in result
-        assert result["12345"]["sample_count"] == 1
+        assert result[msg_key]["sample_count"] == 1
         assert result["Living Room Plug"]["sample_count"] == 1
 
     def test_sorted_weakest_first(self) -> None:
@@ -253,24 +300,25 @@ class TestAggregateSignalStats:
             IncomingMessage("t2", 54321, 50, -80),
         ]
 
-        result = aggregate_signal_stats(messages, [], IEEE_MAP)
+        result = aggregate_signal_stats(messages, [], ADDR_INFO, IEEE_MAP)
 
         keys = list(result.keys())
-        assert keys[0] == "54321"  # weaker signal first
-        assert keys[1] == "12345"
+        # EndDevice key comes first (weaker signal)
+        assert "Kitchen Sensor" in keys[0]
+        assert "Living Room Plug" in keys[1]
 
     def test_empty_messages(self) -> None:
-        result = aggregate_signal_stats([], [], IEEE_MAP)
+        result = aggregate_signal_stats([], [], ADDR_INFO, IEEE_MAP)
         assert result == {}
 
-    def test_unknown_device_uses_numeric(self) -> None:
+    def test_unknown_device_uses_addr_format(self) -> None:
         messages = [
             IncomingMessage("t1", 99999, 100, -70),
         ]
 
-        result = aggregate_signal_stats(messages, [], IEEE_MAP)
+        result = aggregate_signal_stats(messages, [], ADDR_INFO, IEEE_MAP)
 
-        assert "99999" in result
+        assert "[addr:99999]" in result
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +335,7 @@ class TestAnalyzeDebugEntries:
             {"timestamp": "2026-02-08T10:00:03Z", "level": "error", "message": SAMPLE_DEBUG_ROUTE_ERROR},
         ]
 
-        result = analyze_debug_entries(entries, IEEE_MAP)
+        result = analyze_debug_entries(entries, ADDR_INFO, IEEE_MAP)
 
         assert result["total_entries"] == 4
         assert result["categories"]["route_records"] == 1
@@ -299,7 +347,7 @@ class TestAnalyzeDebugEntries:
         assert result["route_errors"][0]["error_type"] == "routeDiscoveryFailed"
 
     def test_empty_entries(self) -> None:
-        result = analyze_debug_entries([], IEEE_MAP)
+        result = analyze_debug_entries([], ADDR_INFO, IEEE_MAP)
 
         assert result["total_entries"] == 0
         assert result["categories"]["route_records"] == 0
@@ -311,7 +359,7 @@ class TestAnalyzeDebugEntries:
             {"timestamp": "t2", "level": "debug", "message": SAMPLE_DEBUG_UART_NOISE},
         ]
 
-        result = analyze_debug_entries(entries, IEEE_MAP)
+        result = analyze_debug_entries(entries, ADDR_INFO, IEEE_MAP)
 
         assert result["categories"]["uart_noise"] == 2
         assert result["categories"]["route_records"] == 0
@@ -332,10 +380,13 @@ class TestAnalyzeDebugEntries:
             },
         ]
 
-        result = analyze_debug_entries(entries, IEEE_MAP)
+        result = analyze_debug_entries(entries, ADDR_INFO, IEEE_MAP)
 
         assert len(result["weak_signal_devices"]) >= 1
-        assert result["weak_signal_devices"][0]["device"] == "54321"
+        # Now keyed by formatted address
+        weak_name = result["weak_signal_devices"][0]["device"]
+        assert "Kitchen Sensor" in weak_name
+        assert "addr:54321" in weak_name
 
     def test_routing_instability(self) -> None:
         """Devices with >= 3 path changes appear in routing_instability."""
@@ -362,7 +413,7 @@ class TestAnalyzeDebugEntries:
             )},
         ]
 
-        result = analyze_debug_entries(entries, IEEE_MAP)
+        result = analyze_debug_entries(entries, ADDR_INFO, IEEE_MAP)
 
         assert len(result["routing_instability"]) >= 1
         assert result["routing_instability"][0]["device"] == "Living Room Plug"

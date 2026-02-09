@@ -123,21 +123,34 @@ def _resolve_ieee(ieee: str, ieee_map: dict[str, str]) -> str:
     return ieee_map.get(ieee, ieee)
 
 
-def _path_key(relay_addrs: list[int]) -> str:
-    if not relay_addrs:
+def _format_relay(addr: int, addr_info: dict[int, dict[str, str]]) -> str:
+    """Format a relay hop address with best-effort name resolution."""
+    info = addr_info.get(addr)
+    if not info:
+        return f"[addr:{addr}]"
+    name = info["name"]
+    dev_type = info["type"]
+    if dev_type == "EndDevice":
+        return f"{name} [addr:{addr}, {dev_type} — likely reassigned]"
+    return f"{name} [addr:{addr}, {dev_type}]"
+
+
+def _path_key(relay_labels: list[str]) -> str:
+    if not relay_labels:
         return "(direct)"
-    return " -> ".join(str(a) for a in relay_addrs)
+    return " -> ".join(relay_labels)
 
 
 def aggregate_routes(
     records: list[RouteRecord],
+    addr_info: dict[int, dict[str, str]],
     ieee_map: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
     """Aggregate route records into per-device routing summaries.
 
-    Relay hops are shown as raw network addresses (not resolved to names)
-    because network addresses are ephemeral and can be reassigned on device
-    rejoin, making historical resolution unreliable.
+    Relay hops are resolved best-effort via addr_info (network_address ->
+    {name, type}). The raw address is always included because network
+    addresses are ephemeral and can be reassigned on device rejoin.
     """
     if not records:
         return {}
@@ -155,7 +168,8 @@ def aggregate_routes(
         path_changes = 0
 
         for rec in recs:
-            key = _path_key(rec.relay_list)
+            formatted = [_format_relay(a, addr_info) for a in rec.relay_list]
+            key = _path_key(formatted)
             observed_paths[key] = observed_paths.get(key, 0) + 1
 
             if prev_path is not None and key != prev_path:
@@ -164,7 +178,10 @@ def aggregate_routes(
 
         # Current path is the last observed
         last = recs[-1]
-        current_path = last.relay_list if last.relay_list else ["(direct)"]
+        if last.relay_list:
+            current_path = [_format_relay(a, addr_info) for a in last.relay_list]
+        else:
+            current_path = ["(direct)"]
 
         result[device_name] = {
             "current_path": current_path,
@@ -179,11 +196,12 @@ def aggregate_routes(
 def aggregate_signal_stats(
     messages: list[IncomingMessage],
     records: list[RouteRecord],
+    addr_info: dict[int, dict[str, str]],
     ieee_map: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
     """Aggregate signal stats (LQI/RSSI) per device, sorted weakest first.
 
-    Incoming messages are keyed by raw network address (ephemeral, may change).
+    Incoming messages are keyed by best-effort resolved name (with raw address).
     Route records are keyed by IEEE-resolved friendly name (permanent).
     """
     if not messages and not records:
@@ -193,7 +211,7 @@ def aggregate_signal_stats(
     samples: dict[str, list[tuple[int, int]]] = {}
 
     for msg in messages:
-        name = str(msg.sender_short_id)
+        name = _format_relay(msg.sender_short_id, addr_info)
         samples.setdefault(name, []).append((msg.last_hop_lqi, msg.last_hop_rssi))
 
     for rec in records:
@@ -223,6 +241,7 @@ def aggregate_signal_stats(
 
 def analyze_debug_entries(
     entries: list[dict[str, str]],
+    addr_info: dict[int, dict[str, str]],
     ieee_map: dict[str, str],
 ) -> dict[str, Any]:
     """Full debug log analysis: categorize, parse, and aggregate."""
@@ -262,8 +281,8 @@ def analyze_debug_entries(
         other_count += 1
 
     # Aggregate
-    routes = aggregate_routes(route_records, ieee_map)
-    signals = aggregate_signal_stats(incoming_messages, route_records, ieee_map)
+    routes = aggregate_routes(route_records, addr_info, ieee_map)
+    signals = aggregate_signal_stats(incoming_messages, route_records, addr_info, ieee_map)
 
     # Build error list with resolved names
     error_list = [

@@ -460,11 +460,12 @@ class TestGetSignalHistory:
         ]
         z2m.get_logs_from_file = MagicMock(return_value=entries)
 
-        # Incoming messages are keyed by raw network address
-        result = await get_signal_history(device="12345", minutes_back=60)
+        # Incoming messages are now keyed by formatted address
+        formatted_key = "Living Room Plug [addr:12345, Router]"
+        result = await get_signal_history(device=formatted_key, minutes_back=60)
 
         assert len(result["devices"]) == 1
-        assert "12345" in result["devices"]
+        assert formatted_key in result["devices"]
 
     @pytest.mark.asyncio
     async def test_no_debug_entries_returns_hint(self, z2m: Z2MClient) -> None:

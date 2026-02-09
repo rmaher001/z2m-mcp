@@ -474,6 +474,7 @@ async def analyze_debug_logs(minutes_back: int = 60) -> dict[str, Any]:
     z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
 
     ieee_map = z2m.build_ieee_map()
+    addr_info = z2m.build_address_info_map()
 
     debug_entries = z2m.get_logs_from_file(minutes_back=minutes_back, level="debug")
 
@@ -499,7 +500,7 @@ async def analyze_debug_logs(minutes_back: int = 60) -> dict[str, Any]:
             "note": _NO_DEBUG_HINT,
         }
 
-    result = analyze_debug_entries(combined, ieee_map)
+    result = analyze_debug_entries(combined, addr_info, ieee_map)
     result["minutes_back"] = minutes_back
     return result
 
@@ -525,6 +526,7 @@ async def get_routing_table(
     z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
 
     ieee_map = z2m.build_ieee_map()
+    addr_info = z2m.build_address_info_map()
 
     entries = z2m.get_logs_from_file(minutes_back=minutes_back, level="debug")
 
@@ -540,7 +542,7 @@ async def get_routing_table(
         if rec:
             records.append(rec)
 
-    routes = aggregate_routes(records, ieee_map)
+    routes = aggregate_routes(records, addr_info, ieee_map)
 
     if device:
         routes = {k: v for k, v in routes.items() if k == device}
@@ -588,6 +590,7 @@ async def get_signal_history(
     z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
 
     ieee_map = z2m.build_ieee_map()
+    addr_info = z2m.build_address_info_map()
 
     entries = z2m.get_logs_from_file(minutes_back=minutes_back, level="debug")
 
@@ -612,7 +615,7 @@ async def get_signal_history(
         if im:
             messages.append(im)
 
-    signals = aggregate_signal_stats(messages, records, ieee_map)
+    signals = aggregate_signal_stats(messages, records, addr_info, ieee_map)
 
     if device:
         signals = {k: v for k, v in signals.items() if k == device}
