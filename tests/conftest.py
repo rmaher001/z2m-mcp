@@ -40,7 +40,11 @@ def app_config(mqtt_config: MQTTConfig, log_config: LogConfig) -> AppConfig:
 SAMPLE_BRIDGE_INFO = {
     "commit": "abc123",
     "config": {
-        "advanced": {"channel": 20, "pan_id": 6754},
+        "advanced": {"channel": 20, "pan_id": 6754, "last_seen": "ISO_8601"},
+        "availability": {
+            "active": {"timeout": 10},
+            "passive": {"timeout": 1500},
+        },
         "permit_join": False,
     },
     "coordinator": {

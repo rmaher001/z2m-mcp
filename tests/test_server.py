@@ -105,6 +105,56 @@ class TestGetBridgeInfo:
         with pytest.raises(RuntimeError, match="not yet available"):
             await get_bridge_info()
 
+    @pytest.mark.asyncio
+    async def test_surfaces_availability_config(self) -> None:
+        result = await get_bridge_info()
+
+        assert "availability_config" in result
+        assert result["availability_config"]["active"]["timeout"] == 10
+        assert result["availability_config"]["passive"]["timeout"] == 1500
+
+    @pytest.mark.asyncio
+    async def test_surfaces_last_seen_config(self) -> None:
+        result = await get_bridge_info()
+
+        assert result["last_seen"] == "ISO_8601"
+
+    @pytest.mark.asyncio
+    async def test_warns_when_availability_disabled(self, z2m: Z2MClient) -> None:
+        # Remove availability config
+        z2m._bridge_info["config"].pop("availability", None)
+
+        result = await get_bridge_info()
+
+        assert any("availability" in w.lower() for w in result.get("warnings", []))
+
+    @pytest.mark.asyncio
+    async def test_warns_when_last_seen_disabled(self, z2m: Z2MClient) -> None:
+        z2m._bridge_info["config"]["advanced"]["last_seen"] = "disable"
+
+        result = await get_bridge_info()
+
+        assert any("last_seen" in w for w in result.get("warnings", []))
+
+    @pytest.mark.asyncio
+    async def test_no_warnings_when_properly_configured(self) -> None:
+        result = await get_bridge_info()
+
+        assert result.get("warnings", []) == []
+
+    @pytest.mark.asyncio
+    async def test_availability_boolean_true_no_warning(self, z2m: Z2MClient) -> None:
+        """Z2M 2.x supports 'availability: true' — should not warn."""
+        z2m._bridge_info["config"]["availability"] = True
+
+        result = await get_bridge_info()
+
+        # Should NOT warn about availability being unconfigured
+        warnings = result.get("warnings", [])
+        assert not any("availability" in w.lower() for w in warnings)
+        # Should surface the config value
+        assert result["availability_config"] is True
+
 
 class TestListDevices:
     @pytest.mark.asyncio
@@ -142,6 +192,15 @@ class TestListDevices:
         device = result["devices"][0]
         assert device["lqi"] == 150
 
+    @pytest.mark.asyncio
+    async def test_includes_availability_from_cache(self, z2m: Z2MClient) -> None:
+        z2m._device_availability["Living Room Plug"] = "online"
+
+        result = await list_devices(device_type="Router")
+
+        device = result["devices"][0]
+        assert device["availability"] == "online"
+
 
 class TestGetDeviceInfo:
     @pytest.mark.asyncio
@@ -177,6 +236,14 @@ class TestGetDeviceInfo:
         result = await get_device_info(device="Living Room Plug")
 
         assert result["state"]["linkquality"] == 150
+
+    @pytest.mark.asyncio
+    async def test_includes_availability(self, z2m: Z2MClient) -> None:
+        z2m._device_availability["Living Room Plug"] = "online"
+
+        result = await get_device_info(device="Living Room Plug")
+
+        assert result["availability"] == "online"
 
 
 class TestGetNetworkMap:
@@ -247,6 +314,33 @@ class TestGetDeviceHealth:
         with pytest.raises(ValueError, match="not found"):
             await get_device_health(device="nonexistent")
 
+    @pytest.mark.asyncio
+    async def test_uses_mqtt_availability_when_present(self, z2m: Z2MClient) -> None:
+        """MQTT availability overrides last_seen-computed availability."""
+        # Update last_seen to be very recent (would compute "online")
+        recent_ts = datetime.now(timezone.utc).isoformat()
+        z2m._process_device_state("Living Room Plug", json.dumps({
+            "linkquality": 150,
+            "last_seen": recent_ts,
+            "state": "ON",
+        }))
+        # But MQTT availability says offline
+        z2m._device_availability["Living Room Plug"] = "offline"
+
+        result = await get_device_health(device="Living Room Plug")
+
+        # MQTT truth wins over computed value
+        assert result["availability"] == "offline"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_last_seen_availability(self) -> None:
+        """Without MQTT availability, computed value from last_seen is used."""
+        # Kitchen Sensor has old last_seen, no MQTT availability
+        result = await get_device_health(device="Kitchen Sensor")
+
+        # last_seen is 2026-02-01 which is >24h old → "offline"
+        assert result["availability"] == "offline"
+
 
 class TestListWeakDevices:
     @pytest.mark.asyncio
@@ -271,6 +365,34 @@ class TestListWeakDevices:
 
         names = [d["friendly_name"] for d in result["devices"]]
         assert "Coordinator" not in names
+
+    @pytest.mark.asyncio
+    async def test_flags_offline_devices(self, z2m: Z2MClient) -> None:
+        """Devices with MQTT availability 'offline' are flagged."""
+        z2m._device_availability["Living Room Plug"] = "offline"
+
+        result = await list_weak_devices(lqi_threshold=0, stale_hours=99999)
+
+        plug = next(
+            (d for d in result["devices"] if d["friendly_name"] == "Living Room Plug"),
+            None,
+        )
+        assert plug is not None
+        assert "offline" in plug["issues"]
+
+    @pytest.mark.asyncio
+    async def test_includes_availability_in_output(self, z2m: Z2MClient) -> None:
+        """Weak device entries include availability field."""
+        z2m._device_availability["Kitchen Sensor"] = "online"
+
+        result = await list_weak_devices(lqi_threshold=50)
+
+        sensor = next(
+            (d for d in result["devices"] if d["friendly_name"] == "Kitchen Sensor"),
+            None,
+        )
+        assert sensor is not None
+        assert sensor["availability"] == "online"
 
 
 class TestAnalyzeLogs:

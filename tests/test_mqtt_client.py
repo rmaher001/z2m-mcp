@@ -414,6 +414,108 @@ class TestBuildAddressInfoMap:
         assert addr_info[999] == {"name": "NoType", "type": "Unknown"}
 
 
+class TestDeviceAvailability:
+    def test_initial_availability_empty(self, z2m_client: Z2MClient) -> None:
+        """Availability cache is empty on init."""
+        assert z2m_client._device_availability == {}
+
+    def test_process_availability_online(self, z2m_client: Z2MClient) -> None:
+        """Routing an online availability message stores 'online'."""
+        z2m_client._route_message(
+            "zigbee2mqtt/Living Room Plug/availability",
+            json.dumps({"state": "online"}),
+        )
+        assert z2m_client._device_availability["Living Room Plug"] == "online"
+
+    def test_process_availability_offline(self, z2m_client: Z2MClient) -> None:
+        """Routing an offline availability message stores 'offline'."""
+        z2m_client._route_message(
+            "zigbee2mqtt/Living Room Plug/availability",
+            json.dumps({"state": "offline"}),
+        )
+        assert z2m_client._device_availability["Living Room Plug"] == "offline"
+
+    def test_get_device_availability_returns_cached(self, z2m_client: Z2MClient) -> None:
+        """get_device_availability returns the cached value."""
+        z2m_client._route_message(
+            "zigbee2mqtt/Living Room Plug/availability",
+            json.dumps({"state": "online"}),
+        )
+        assert z2m_client.get_device_availability("Living Room Plug") == "online"
+
+    def test_get_device_availability_unknown_device(self, z2m_client: Z2MClient) -> None:
+        """get_device_availability returns None for uncached device."""
+        assert z2m_client.get_device_availability("Unknown Device") is None
+
+    def test_route_message_availability_topic(self, z2m_client: Z2MClient) -> None:
+        """Availability topic routes to availability handler, not device state."""
+        z2m_client._route_message(
+            "zigbee2mqtt/Device/availability",
+            json.dumps({"state": "online"}),
+        )
+        assert z2m_client._device_availability.get("Device") == "online"
+
+    def test_device_state_not_polluted_by_availability(self, z2m_client: Z2MClient) -> None:
+        """Availability messages do not create entries in _device_states."""
+        z2m_client._route_message(
+            "zigbee2mqtt/Living Room Plug/availability",
+            json.dumps({"state": "online"}),
+        )
+        assert "Living Room Plug/availability" not in z2m_client._device_states
+        assert "Living Room Plug" not in z2m_client._device_states
+
+    def test_availability_non_json_ignored(self, z2m_client: Z2MClient) -> None:
+        """Non-JSON availability payload is silently ignored."""
+        z2m_client._route_message(
+            "zigbee2mqtt/Device/availability",
+            "not valid json",
+        )
+        assert z2m_client._device_availability == {}
+
+    def test_null_state_evicts_from_cache(self, z2m_client: Z2MClient) -> None:
+        """Payload with state: null clears cached availability."""
+        z2m_client._device_availability["Device"] = "online"
+        z2m_client._route_message(
+            "zigbee2mqtt/Device/availability",
+            json.dumps({"state": None}),
+        )
+        assert "Device" not in z2m_client._device_availability
+
+    def test_multi_segment_name_rejected(self, z2m_client: Z2MClient) -> None:
+        """Topics with multi-segment device names don't route to availability."""
+        z2m_client._route_message(
+            "zigbee2mqtt/some/deep/availability",
+            json.dumps({"state": "online"}),
+        )
+        assert z2m_client._device_availability == {}
+
+    def test_get_all_devices_includes_availability(self, z2m_client: Z2MClient) -> None:
+        """get_all_devices enriches devices with cached availability."""
+        z2m_client._process_devices_message(json.dumps(SAMPLE_DEVICES_LIST))
+        z2m_client._device_availability["Living Room Plug"] = "online"
+
+        devices = z2m_client.get_all_devices()
+        plug = next(d for d in devices if d["friendly_name"] == "Living Room Plug")
+        assert plug["availability"] == "online"
+
+    def test_get_device_includes_availability(self, z2m_client: Z2MClient) -> None:
+        """get_device enriches device with cached availability."""
+        z2m_client._process_devices_message(json.dumps(SAMPLE_DEVICES_LIST))
+        z2m_client._device_availability["Living Room Plug"] = "offline"
+
+        device = z2m_client.get_device("Living Room Plug")
+        assert device is not None
+        assert device["availability"] == "offline"
+
+    def test_get_device_no_availability_key_when_absent(self, z2m_client: Z2MClient) -> None:
+        """Devices without cached availability don't have the key."""
+        z2m_client._process_devices_message(json.dumps(SAMPLE_DEVICES_LIST))
+
+        device = z2m_client.get_device("Kitchen Sensor")
+        assert device is not None
+        assert "availability" not in device
+
+
 class TestCleanupOldLogs:
     def test_deletes_files_older_than_retention(self, tmp_path: os.PathLike, mqtt_config: MQTTConfig) -> None:
         """Files with mtime older than retention_days are deleted."""

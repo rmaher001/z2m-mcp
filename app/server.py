@@ -69,6 +69,8 @@ async def get_bridge_info() -> dict[str, Any]:
 
     coordinator = info.get("coordinator", {})
     network = info.get("network", {})
+    config = info.get("config", {})
+    advanced = config.get("advanced", {})
     devices = z2m.get_all_devices()
 
     # Count by type
@@ -77,7 +79,24 @@ async def get_bridge_info() -> dict[str, Any]:
         t = d.get("type", "Unknown")
         type_counts[t] = type_counts.get(t, 0) + 1
 
-    return {
+    # Config warnings
+    warnings: list[str] = []
+    availability_config = config.get("availability")
+    last_seen_format = advanced.get("last_seen")
+
+    if not availability_config:
+        warnings.append(
+            "Z2M availability feature is not configured. "
+            "Enable it for real-time online/offline tracking."
+        )
+
+    if not last_seen_format or last_seen_format == "disable":
+        warnings.append(
+            "last_seen is disabled. Set advanced.last_seen to "
+            "'ISO_8601' for device freshness tracking."
+        )
+
+    result: dict[str, Any] = {
         "version": info.get("version"),
         "zigbee_herdsman": info.get("zigbee_herdsman", {}).get("version"),
         "zigbee_herdsman_converters": info.get("zigbee_herdsman_converters", {}).get("version"),
@@ -96,7 +115,16 @@ async def get_bridge_info() -> dict[str, Any]:
         "restart_required": info.get("restart_required", False),
         "device_count": len(devices),
         "device_types": type_counts,
+        "last_seen": last_seen_format,
     }
+
+    if availability_config:
+        result["availability_config"] = availability_config
+
+    if warnings:
+        result["warnings"] = warnings
+
+    return result
 
 
 @mcp.tool()
@@ -141,6 +169,9 @@ async def list_devices(
             entry["lqi"] = state["linkquality"]
         if "last_seen" in state:
             entry["last_seen"] = state["last_seen"]
+        availability = d.get("availability")
+        if availability:
+            entry["availability"] = availability
         result.append(entry)
 
     return {
@@ -191,6 +222,10 @@ async def get_device_info(
 
     if state:
         result["state"] = state
+
+    availability = d.get("availability")
+    if availability:
+        result["availability"] = availability
 
     if detailed:
         result["endpoints"] = d.get("endpoints")
@@ -308,6 +343,11 @@ async def get_device_health(device: str) -> dict[str, Any]:
         except (ValueError, TypeError):
             health["availability"] = "unknown"
 
+    # Prefer real-time MQTT availability over computed value
+    mqtt_availability = d.get("availability")
+    if mqtt_availability:
+        health["availability"] = mqtt_availability
+
     # Battery
     battery = state.get("battery")
     if battery is not None:
@@ -357,6 +397,10 @@ async def list_weak_devices(
         if lqi is not None and lqi < lqi_threshold:
             issues.append(f"low_lqi ({lqi})")
 
+        availability = d.get("availability")
+        if availability == "offline":
+            issues.append("offline")
+
         last_seen = state.get("last_seen")
         age_hours = None
         if last_seen:
@@ -372,7 +416,7 @@ async def list_weak_devices(
                 pass
 
         if issues:
-            weak.append({
+            entry: dict[str, Any] = {
                 "friendly_name": d.get("friendly_name"),
                 "ieee_address": d.get("ieee_address"),
                 "type": d.get("type"),
@@ -380,7 +424,10 @@ async def list_weak_devices(
                 "lqi": lqi,
                 "last_seen_hours_ago": round(age_hours, 1) if age_hours else None,
                 "issues": issues,
-            })
+            }
+            if availability:
+                entry["availability"] = availability
+            weak.append(entry)
 
     weak.sort(key=lambda x: x.get("lqi") or 999)
     total = len(weak)

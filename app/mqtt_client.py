@@ -37,6 +37,7 @@ class Z2MClient:
         self._config = config
         self._devices: list[dict[str, Any]] = []
         self._device_states: dict[str, dict[str, Any]] = {}
+        self._device_availability: dict[str, str] = {}
         self._bridge_info: dict[str, Any] | None = None
         self._response_events: dict[str, asyncio.Event] = {}
         self._response_data: dict[str, dict[str, Any]] = {}
@@ -117,6 +118,7 @@ class Z2MClient:
             # Subscribe to Z2M topics
             await self._client.subscribe(f"{Z2M_BRIDGE}/#")
             await self._client.subscribe(f"{Z2M_BASE}/+")
+            await self._client.subscribe(f"{Z2M_BASE}/+/availability")
 
             self._listen_task = asyncio.create_task(self._listen())
             logger.info("Z2M MQTT client started")
@@ -171,6 +173,11 @@ class Z2MClient:
         elif topic.startswith(f"{Z2M_BRIDGE}/"):
             # Other bridge messages (state, etc.) - ignore
             pass
+        elif topic.endswith("/availability"):
+            # Per-device availability: zigbee2mqtt/<device>/availability
+            name = topic[len(f"{Z2M_BASE}/"):-len("/availability")]
+            if name and "/" not in name:
+                self._process_device_availability(name, payload)
         else:
             # Device state updates
             name = self._device_name_from_topic(topic)
@@ -229,6 +236,24 @@ class Z2MClient:
             return
         self._device_states[device_name] = state
 
+    def _process_device_availability(self, device_name: str, payload: str) -> None:
+        """Update device availability from zigbee2mqtt/<device>/availability topic."""
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            logger.debug("Non-JSON availability payload for %s: %.100s", device_name, payload)
+            return
+        state = data.get("state")
+        if state is None:
+            # Z2M may publish null to clear retained availability message
+            self._device_availability.pop(device_name, None)
+            return
+        self._device_availability[device_name] = state
+
+    def get_device_availability(self, device_name: str) -> str | None:
+        """Return cached availability for a device, or None if unknown."""
+        return self._device_availability.get(device_name)
+
     def _process_response(self, topic: str, payload: str) -> None:
         """Handle response to a request-response call."""
         data = json.loads(payload)
@@ -253,6 +278,8 @@ class Z2MClient:
             name = dev.get("friendly_name", "")
             if name in self._device_states:
                 enriched["state"] = self._device_states[name]
+            if name in self._device_availability:
+                enriched["availability"] = self._device_availability[name]
             result.append(enriched)
         return result
 
@@ -264,6 +291,8 @@ class Z2MClient:
                 name = dev.get("friendly_name", "")
                 if name in self._device_states:
                     enriched["state"] = self._device_states[name]
+                if name in self._device_availability:
+                    enriched["availability"] = self._device_availability[name]
                 return enriched
         return None
 
