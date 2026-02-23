@@ -503,13 +503,11 @@ class TestAnalyzeDebugLogs:
     @pytest.mark.asyncio
     async def test_includes_route_errors(self, z2m: Z2MClient) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        debug_entries = [
+        all_entries = [
             {"timestamp": now, "level": "debug", "message": SAMPLE_DEBUG_ROUTE_RECORD},
-        ]
-        error_entries = [
             {"timestamp": now, "level": "error", "message": SAMPLE_DEBUG_ROUTE_ERROR},
         ]
-        z2m.get_logs_from_file = MagicMock(side_effect=[debug_entries, error_entries])
+        z2m.get_logs_from_file = MagicMock(return_value=all_entries)
 
         result = await analyze_debug_logs(minutes_back=60)
 

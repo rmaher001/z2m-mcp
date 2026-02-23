@@ -27,8 +27,8 @@ _z2m: Z2MClient | None = None
 
 def _shutdown_client() -> None:
     """Close the log file handler on process exit."""
-    if _z2m is not None and _z2m._log_writer is not None:
-        _z2m._log_writer.close()
+    if _z2m is not None:
+        _z2m.close_log_writer()
 
 
 atexit.register(_shutdown_client)
@@ -170,7 +170,7 @@ async def list_devices(
         if "last_seen" in state:
             entry["last_seen"] = state["last_seen"]
         availability = d.get("availability")
-        if availability:
+        if availability is not None:
             entry["availability"] = availability
         result.append(entry)
 
@@ -224,7 +224,7 @@ async def get_device_info(
         result["state"] = state
 
     availability = d.get("availability")
-    if availability:
+    if availability is not None:
         result["availability"] = availability
 
     if detailed:
@@ -345,7 +345,7 @@ async def get_device_health(device: str) -> dict[str, Any]:
 
     # Prefer real-time MQTT availability over computed value
     mqtt_availability = d.get("availability")
-    if mqtt_availability:
+    if mqtt_availability is not None:
         health["availability"] = mqtt_availability
 
     # Battery
@@ -425,7 +425,7 @@ async def list_weak_devices(
                 "last_seen_hours_ago": round(age_hours, 1) if age_hours else None,
                 "issues": issues,
             }
-            if availability:
+            if availability is not None:
                 entry["availability"] = availability
             weak.append(entry)
 
@@ -523,13 +523,9 @@ async def analyze_debug_logs(minutes_back: int = 60) -> dict[str, Any]:
     ieee_map = z2m.build_ieee_map()
     addr_info = z2m.build_address_info_map()
 
-    debug_entries = z2m.get_logs_from_file(minutes_back=minutes_back, level="debug")
-
-    # Also fetch non-debug entries for route errors (logged at error/warn level)
+    # Single read — split into debug + non-debug (route errors at error/warn level)
     all_entries = z2m.get_logs_from_file(minutes_back=minutes_back)
-    non_debug = [e for e in all_entries if e.get("level") != "debug"]
-
-    combined = debug_entries + non_debug
+    combined = all_entries
 
     if not combined:
         return {

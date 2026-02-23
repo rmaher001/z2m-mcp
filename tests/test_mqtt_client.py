@@ -150,10 +150,6 @@ class TestZ2MClientTopicParsing:
         assert z2m_client._device_name_from_topic("zigbee2mqtt/bridge/info") is None
         assert z2m_client._device_name_from_topic("zigbee2mqtt/bridge/devices") is None
 
-    def test_extract_response_topic_key(self, z2m_client: Z2MClient) -> None:
-        topic = "zigbee2mqtt/bridge/response/permit_join"
-        assert topic == "zigbee2mqtt/bridge/response/permit_join"
-
 
 class TestZ2MClientLogCapture:
     def test_process_log_message_populates_buffer(self, z2m_client: Z2MClient) -> None:

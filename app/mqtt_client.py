@@ -41,6 +41,7 @@ class Z2MClient:
         self._bridge_info: dict[str, Any] | None = None
         self._response_events: dict[str, asyncio.Event] = {}
         self._response_data: dict[str, dict[str, Any]] = {}
+        self._response_locks: dict[str, asyncio.Lock] = {}
         self._client: aiomqtt.Client | None = None
         self._listen_task: asyncio.Task[None] | None = None
 
@@ -94,11 +95,17 @@ class Z2MClient:
         # Enforce max_total_mb cap — delete oldest first
         max_bytes = log_config.max_total_mb * 1024 * 1024
         remaining.sort(key=lambda p: os.path.getmtime(p))
-        total = sum(os.path.getsize(p) for p in remaining)
+        sizes: dict[str, int] = {}
+        for p in remaining:
+            try:
+                sizes[p] = os.path.getsize(p)
+            except OSError:
+                sizes[p] = 0
+        total = sum(sizes.values())
         while total > max_bytes and remaining:
             oldest = remaining.pop(0)
             try:
-                total -= os.path.getsize(oldest)
+                total -= sizes[oldest]
                 os.remove(oldest)
                 logger.info("Deleted log file for size cap: %s", oldest)
             except OSError:
@@ -254,6 +261,11 @@ class Z2MClient:
         """Return cached availability for a device, or None if unknown."""
         return self._device_availability.get(device_name)
 
+    def close_log_writer(self) -> None:
+        """Close the log file handler (sync-safe for atexit use)."""
+        if self._log_writer is not None:
+            self._log_writer.close()
+
     def _process_response(self, topic: str, payload: str) -> None:
         """Handle response to a request-response call."""
         data = json.loads(payload)
@@ -358,34 +370,32 @@ class Z2MClient:
         results = []
 
         try:
-            f = open(self._log_file_path, encoding="utf-8")
+            with open(self._log_file_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Filter by time
+                    try:
+                        ts = datetime.fromisoformat(entry["timestamp"])
+                        age_minutes = (now - ts).total_seconds() / 60
+                        if age_minutes > minutes_back:
+                            continue
+                    except (ValueError, KeyError):
+                        continue
+
+                    # Filter by level
+                    if level and entry.get("level") != level:
+                        continue
+
+                    results.append(entry)
         except FileNotFoundError:
             return []
-
-        with f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                # Filter by time
-                try:
-                    ts = datetime.fromisoformat(entry["timestamp"])
-                    age_minutes = (now - ts).total_seconds() / 60
-                    if age_minutes > minutes_back:
-                        continue
-                except (ValueError, KeyError):
-                    continue
-
-                # Filter by level
-                if level and entry.get("level") != level:
-                    continue
-
-                results.append(entry)
 
         return results
 
@@ -406,35 +416,44 @@ class Z2MClient:
     ) -> dict[str, Any]:
         """Publish a request and wait for a response.
 
+        Serializes concurrent callers on the same response_topic to prevent
+        one caller's Event from overwriting another's.
+
         Raises:
             TimeoutError: If no response within timeout.
             RuntimeError: If response indicates error.
         """
-        event = asyncio.Event()
-        self._response_events[response_topic] = event
+        # Get or create a per-topic lock to serialize concurrent callers
+        if response_topic not in self._response_locks:
+            self._response_locks[response_topic] = asyncio.Lock()
+        lock = self._response_locks[response_topic]
 
-        try:
-            # Publish request
-            if self._client:
-                await self._client.publish(request_topic, json.dumps(payload))
+        async with lock:
+            event = asyncio.Event()
+            self._response_events[response_topic] = event
 
-            # Wait for response
             try:
-                await asyncio.wait_for(event.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"No response on {response_topic} within {timeout}s"
-                )
+                # Publish request
+                if self._client:
+                    await self._client.publish(request_topic, json.dumps(payload))
 
-            data = self._response_data.pop(response_topic, {})
+                # Wait for response
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    raise TimeoutError(
+                        f"No response on {response_topic} within {timeout}s"
+                    )
 
-            # Check for error response
-            if data.get("status") == "error":
-                raise RuntimeError(data.get("error", "Unknown Z2M error"))
+                data = self._response_data.pop(response_topic, {})
 
-            return data
-        finally:
-            self._response_events.pop(response_topic, None)
+                # Check for error response
+                if data.get("status") == "error":
+                    raise RuntimeError(data.get("error", "Unknown Z2M error"))
+
+                return data
+            finally:
+                self._response_events.pop(response_topic, None)
 
     def build_ieee_map(self) -> dict[str, str]:
         """Build ieee_address -> friendly_name map from cached devices."""
