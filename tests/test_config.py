@@ -134,3 +134,43 @@ class TestLoadConfig:
 
         with pytest.raises(AttributeError):
             config.mqtt.host = "other"  # type: ignore[misc]
+
+
+class TestTransportAndAuth:
+    def test_default_transport_is_stdio(self) -> None:
+        with patch.dict(os.environ, VALID_ENV, clear=True):
+            config = load_config()
+        assert config.transport == "stdio"
+
+    def test_stdio_transport_no_token_required(self) -> None:
+        env = {**VALID_ENV, "MCP_TRANSPORT": "stdio"}
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config()
+        assert config.transport == "stdio"
+        assert config.auth_token is None
+
+    def test_sse_transport_requires_auth_token(self) -> None:
+        env = {**VALID_ENV, "MCP_TRANSPORT": "sse"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="MCP_AUTH_TOKEN"):
+                load_config()
+
+    def test_sse_transport_rejects_short_token(self) -> None:
+        env = {**VALID_ENV, "MCP_TRANSPORT": "sse", "MCP_AUTH_TOKEN": "abc"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="at least 32 characters"):
+                load_config()
+
+    def test_sse_transport_accepts_valid_token(self) -> None:
+        token = "a" * 64
+        env = {**VALID_ENV, "MCP_TRANSPORT": "sse", "MCP_AUTH_TOKEN": token}
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config()
+        assert config.transport == "sse"
+        assert config.auth_token == token
+
+    def test_invalid_transport_rejected(self) -> None:
+        env = {**VALID_ENV, "MCP_TRANSPORT": "telepathy"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="MCP_TRANSPORT"):
+                load_config()

@@ -34,6 +34,12 @@ class AppConfig:
     mqtt: MQTTConfig
     log: LogConfig
     timezone: str
+    transport: str
+    auth_token: str | None
+
+
+VALID_TRANSPORTS = ("stdio", "sse")
+MIN_AUTH_TOKEN_LENGTH = 32
 
 
 def load_config() -> AppConfig:
@@ -103,4 +109,25 @@ def load_config() -> AppConfig:
 
     timezone = os.environ.get("TZ", "UTC")
 
-    return AppConfig(mqtt=mqtt, log=log, timezone=timezone)
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    if transport not in VALID_TRANSPORTS:
+        raise ValueError(
+            f"MCP_TRANSPORT must be one of {VALID_TRANSPORTS}, got '{transport}'"
+        )
+
+    auth_token = os.environ.get("MCP_AUTH_TOKEN") or None
+    if transport == "sse":
+        if not auth_token:
+            raise ValueError("MCP_AUTH_TOKEN is required when MCP_TRANSPORT=sse")
+        if len(auth_token) < MIN_AUTH_TOKEN_LENGTH:
+            raise ValueError(
+                f"MCP_AUTH_TOKEN must be at least {MIN_AUTH_TOKEN_LENGTH} characters"
+            )
+
+    return AppConfig(
+        mqtt=mqtt,
+        log=log,
+        timezone=timezone,
+        transport=transport,
+        auth_token=auth_token,
+    )
