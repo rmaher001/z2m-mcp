@@ -33,8 +33,22 @@ LOG_BUFFER_MAX = 1000
 class Z2MClient:
     """Async MQTT client for Zigbee2MQTT."""
 
-    def __init__(self, config: MQTTConfig, log_config: LogConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: MQTTConfig,
+        log_config: LogConfig | None = None,
+        *,
+        reconnect_interval: float = 5.0,
+        connect_timeout: float = 10.0,
+        settle_delay: float = 1.0,
+    ) -> None:
         self._config = config
+        self._reconnect_interval = reconnect_interval
+        self._connect_timeout = connect_timeout
+        self._settle_delay = settle_delay
+        self._running = False
+        self._connected_event = asyncio.Event()
+        self._run_task: asyncio.Task[None] | None = None
         self._devices: list[dict[str, Any]] = []
         self._device_states: dict[str, dict[str, Any]] = {}
         self._device_availability: dict[str, str] = {}
@@ -43,7 +57,6 @@ class Z2MClient:
         self._response_data: dict[str, dict[str, Any]] = {}
         self._response_locks: dict[str, asyncio.Lock] = {}
         self._client: aiomqtt.Client | None = None
-        self._listen_task: asyncio.Task[None] | None = None
 
         # Log capture
         self._log_buffer: collections.deque[dict[str, str]] = collections.deque(
@@ -112,60 +125,96 @@ class Z2MClient:
                 logger.exception("Failed to remove log file: %s", oldest)
 
     async def start(self) -> None:
-        """Connect to MQTT broker and start listening for Z2M messages."""
-        self._client = aiomqtt.Client(
-            hostname=self._config.host,
-            port=self._config.port,
-            username=self._config.username,
-            password=self._config.password,
-        )
+        """Start the MQTT connection manager.
+
+        Launches a background task that connects, subscribes, listens, and
+        RECONNECTS automatically when the broker connection drops. Waits up to
+        ``connect_timeout`` for the first successful connection so the caller
+        sees populated caches — but never blocks forever: if the broker is
+        unreachable at startup, the manager keeps retrying in the background
+        instead of raising (so the MCP server still boots).
+        """
+        self._running = True
+        self._connected_event = asyncio.Event()
+        self._run_task = asyncio.create_task(self._run())
         try:
-            await self._client.__aenter__()
-
-            # Subscribe to Z2M topics
-            await self._client.subscribe(f"{Z2M_BRIDGE}/#")
-            await self._client.subscribe(f"{Z2M_BASE}/+")
-            await self._client.subscribe(f"{Z2M_BASE}/+/availability")
-
-            self._listen_task = asyncio.create_task(self._listen())
-            logger.info("Z2M MQTT client started")
-
-            # Wait briefly for retained messages
-            await asyncio.sleep(1.0)
-        except Exception:
-            if self._client:
-                await self._client.__aexit__(None, None, None)
-                self._client = None
-            raise
+            await asyncio.wait_for(
+                self._connected_event.wait(), timeout=self._connect_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "MQTT broker not reachable within %.0fs at startup; "
+                "reconnecting in the background",
+                self._connect_timeout,
+            )
+        else:
+            # Let retained messages (bridge info/devices, states) arrive.
+            if self._settle_delay > 0:
+                await asyncio.sleep(self._settle_delay)
 
     async def stop(self) -> None:
-        """Disconnect from MQTT broker."""
-        if self._listen_task:
-            self._listen_task.cancel()
+        """Stop the connection manager and disconnect from the broker."""
+        self._running = False
+        if self._run_task:
+            self._run_task.cancel()
             try:
-                await self._listen_task
+                await self._run_task
             except asyncio.CancelledError:
                 pass
-        if self._client:
-            await self._client.__aexit__(None, None, None)
+            self._run_task = None
         if self._log_writer:
             self._log_writer.close()
         logger.info("Z2M MQTT client stopped")
 
-    async def _listen(self) -> None:
-        """Listen for incoming MQTT messages."""
-        if not self._client:
-            return
-        async for message in self._client.messages:
-            topic = str(message.topic)
-            payload = message.payload
-            if isinstance(payload, (bytes, bytearray)):
-                payload = payload.decode("utf-8", errors="replace")
+    async def _run(self) -> None:
+        """Connect, subscribe, and listen — reconnecting on connection loss.
 
+        aiomqtt 2.x has no built-in reconnection, so a dropped socket ends the
+        ``async for`` message iterator. Without this loop the process stays
+        alive serving frozen caches indefinitely (the observed 'up 4 days,
+        10h-stale' failure). Each loop iteration re-establishes the connection
+        and re-subscribes to every Z2M topic.
+        """
+        while self._running:
             try:
-                self._route_message(topic, payload)
+                async with aiomqtt.Client(
+                    hostname=self._config.host,
+                    port=self._config.port,
+                    username=self._config.username,
+                    password=self._config.password,
+                ) as client:
+                    self._client = client
+                    await client.subscribe(f"{Z2M_BRIDGE}/#")
+                    await client.subscribe(f"{Z2M_BASE}/+")
+                    await client.subscribe(f"{Z2M_BASE}/+/availability")
+                    self._connected_event.set()
+                    logger.info("Z2M MQTT client connected")
+                    async for message in client.messages:
+                        self._handle_message(message)
+            except aiomqtt.MqttError as exc:
+                logger.warning("MQTT connection lost: %s", exc)
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                logger.exception("Error processing message on %s", topic)
+                # Defense-in-depth: any unexpected exception must NOT kill the
+                # loop, or the caches would silently freeze again via a
+                # different trigger than the original MqttError bug.
+                logger.exception("Unexpected error in Z2M MQTT run loop")
+            finally:
+                self._client = None
+            if self._running:
+                await asyncio.sleep(self._reconnect_interval)
+
+    def _handle_message(self, message: aiomqtt.Message) -> None:
+        """Decode and route a single incoming MQTT message."""
+        topic = str(message.topic)
+        payload = message.payload
+        if isinstance(payload, (bytes, bytearray)):
+            payload = payload.decode("utf-8", errors="replace")
+        try:
+            self._route_message(topic, payload)
+        except Exception:
+            logger.exception("Error processing message on %s", topic)
 
     def _route_message(self, topic: str, payload: str) -> None:
         """Route incoming message to appropriate handler."""

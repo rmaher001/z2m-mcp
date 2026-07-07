@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiomqtt
 import pytest
 
 from app.config import LogConfig, MQTTConfig
@@ -621,3 +622,252 @@ class TestCleanupOldLogs:
         assert os.path.exists(files[0])
         assert os.path.exists(files[1])
         assert os.path.exists(files[2])
+
+
+class _ReconnectFakeClient:
+    """Fake aiomqtt.Client whose first connection drops, then stays up.
+
+    Simulates a broker connection that succeeds, is lost (raises MqttError
+    the way aiomqtt does when the socket dies mid-stream), and is then
+    re-established. Lets us assert the client reconnects and RE-SUBSCRIBES
+    rather than freezing its caches forever — the real-world failure that
+    left the running container serving 10h-stale data with an up process.
+
+    Class-level counters aggregate across every (re)connection so the test
+    can count how many times the bridge topic was subscribed.
+    """
+
+    connect_count = 0
+    subscribe_topics: list[str] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        self._kwargs = kwargs
+        self._my_connect = 0
+
+    async def __aenter__(self) -> "_ReconnectFakeClient":
+        type(self).connect_count += 1
+        self._my_connect = type(self).connect_count
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def subscribe(self, topic: str, *args: object, **kwargs: object) -> None:
+        type(self).subscribe_topics.append(topic)
+
+    async def publish(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    @property
+    def messages(self):
+        return self._message_stream()
+
+    async def _message_stream(self):
+        if self._my_connect == 1:
+            # First connection drops immediately, the way a keepalive
+            # timeout or broker restart surfaces in aiomqtt.
+            raise aiomqtt.MqttError("simulated connection loss")
+        # Later connections stay up until the listener task is cancelled.
+        await asyncio.sleep(3600)
+        return
+        yield  # pragma: no cover — marks this an async generator
+
+
+class TestZ2MClientReconnect:
+    @pytest.mark.asyncio
+    async def test_reconnects_and_resubscribes_after_connection_loss(
+        self, mqtt_config: MQTTConfig
+    ) -> None:
+        _ReconnectFakeClient.connect_count = 0
+        _ReconnectFakeClient.subscribe_topics = []
+
+        client = Z2MClient(mqtt_config, reconnect_interval=0.01, settle_delay=0.0)
+        bridge_topic = "zigbee2mqtt/bridge/#"
+
+        with patch("app.mqtt_client.aiomqtt.Client", _ReconnectFakeClient):
+            await client.start()
+            try:
+                # Bounded wait for the reconnect to re-subscribe.
+                for _ in range(200):
+                    if _ReconnectFakeClient.subscribe_topics.count(bridge_topic) >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                await client.stop()
+
+        # Subscribed once on the initial connect and again after reconnect.
+        assert _ReconnectFakeClient.connect_count >= 2
+        assert _ReconnectFakeClient.subscribe_topics.count(bridge_topic) >= 2
+
+
+class _FailThenConnectFakeClient:
+    """Fake whose first connect fails, then succeeds and stays up.
+
+    Models a broker that is down when the MCP server boots but comes back
+    shortly after. start() must NOT raise (that would take the whole server
+    down); it should return and keep retrying in the background.
+    """
+
+    connect_attempts = 0
+
+    def __init__(self, **kwargs: object) -> None:
+        self._kwargs = kwargs
+
+    async def __aenter__(self) -> "_FailThenConnectFakeClient":
+        type(self).connect_attempts += 1
+        if type(self).connect_attempts == 1:
+            raise aiomqtt.MqttError("broker unreachable at startup")
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def subscribe(self, topic: str, *args: object, **kwargs: object) -> None:
+        return None
+
+    @property
+    def messages(self):
+        return self._message_stream()
+
+    async def _message_stream(self):
+        await asyncio.sleep(3600)
+        return
+        yield  # pragma: no cover — marks this an async generator
+
+
+class TestZ2MClientStartupResilience:
+    @pytest.mark.asyncio
+    async def test_start_does_not_raise_when_broker_unreachable(
+        self, mqtt_config: MQTTConfig
+    ) -> None:
+        _FailThenConnectFakeClient.connect_attempts = 0
+
+        client = Z2MClient(
+            mqtt_config,
+            reconnect_interval=0.01,
+            connect_timeout=2.0,
+            settle_delay=0.0,
+        )
+
+        with patch("app.mqtt_client.aiomqtt.Client", _FailThenConnectFakeClient):
+            # Must return normally despite the failed first connection.
+            await client.start()
+            try:
+                for _ in range(200):
+                    if _FailThenConnectFakeClient.connect_attempts >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                await client.stop()
+
+        # Retried past the initial failure and connected.
+        assert _FailThenConnectFakeClient.connect_attempts >= 2
+
+
+class _UnexpectedErrorThenConnectFakeClient:
+    """First connection raises a NON-MqttError, then stays up.
+
+    Guards against an unexpected exception type silently killing the reconnect
+    loop — which would re-freeze the caches via a different trigger than the
+    original bug. The loop must recover from *any* exception, not just
+    aiomqtt.MqttError.
+    """
+
+    connect_count = 0
+
+    def __init__(self, **kwargs: object) -> None:
+        self._my_connect = 0
+
+    async def __aenter__(self) -> "_UnexpectedErrorThenConnectFakeClient":
+        type(self).connect_count += 1
+        self._my_connect = type(self).connect_count
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def subscribe(self, topic: str, *args: object, **kwargs: object) -> None:
+        return None
+
+    @property
+    def messages(self):
+        return self._message_stream()
+
+    async def _message_stream(self):
+        if self._my_connect == 1:
+            raise RuntimeError("unexpected non-MqttError failure")
+        await asyncio.sleep(3600)
+        return
+        yield  # pragma: no cover — marks this an async generator
+
+
+class TestZ2MClientReconnectOnUnexpectedError:
+    @pytest.mark.asyncio
+    async def test_reconnects_after_unexpected_exception(
+        self, mqtt_config: MQTTConfig
+    ) -> None:
+        _UnexpectedErrorThenConnectFakeClient.connect_count = 0
+
+        client = Z2MClient(mqtt_config, reconnect_interval=0.01, settle_delay=0.0)
+
+        with patch(
+            "app.mqtt_client.aiomqtt.Client", _UnexpectedErrorThenConnectFakeClient
+        ):
+            await client.start()
+            try:
+                for _ in range(200):
+                    if _UnexpectedErrorThenConnectFakeClient.connect_count >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                await client.stop()
+
+        # Recovered from the unexpected exception and reconnected.
+        assert _UnexpectedErrorThenConnectFakeClient.connect_count >= 2
+
+
+class _AlwaysDownFakeClient:
+    """Every connection attempt fails — models a broker that stays down."""
+
+    connect_attempts = 0
+
+    def __init__(self, **kwargs: object) -> None:
+        pass
+
+    async def __aenter__(self) -> "_AlwaysDownFakeClient":
+        type(self).connect_attempts += 1
+        raise aiomqtt.MqttError("broker stays down")
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class TestZ2MClientStartupTimeout:
+    @pytest.mark.asyncio
+    async def test_start_returns_at_timeout_and_keeps_retrying(
+        self, mqtt_config: MQTTConfig
+    ) -> None:
+        _AlwaysDownFakeClient.connect_attempts = 0
+
+        client = Z2MClient(
+            mqtt_config,
+            reconnect_interval=0.02,
+            connect_timeout=0.1,
+            settle_delay=0.0,
+        )
+
+        with patch("app.mqtt_client.aiomqtt.Client", _AlwaysDownFakeClient):
+            # Broker never comes up: start() must return via the connect_timeout
+            # branch WITHOUT raising, rather than blocking forever.
+            await client.start()
+            attempts_at_return = _AlwaysDownFakeClient.connect_attempts
+            try:
+                # The background task keeps retrying after start() returned.
+                for _ in range(200):
+                    if _AlwaysDownFakeClient.connect_attempts > attempts_at_return:
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                await client.stop()
+
+        assert _AlwaysDownFakeClient.connect_attempts > attempts_at_return
