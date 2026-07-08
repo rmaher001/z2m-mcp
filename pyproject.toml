@@ -5,7 +5,7 @@ description = "Zigbee2MQTT diagnostics and control MCP server"
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.4.1",
-    "aiomqtt>=2.0.0",
+    "aiomqtt>=2.5.0,<3",
 ]
 
 [project.scripts]
