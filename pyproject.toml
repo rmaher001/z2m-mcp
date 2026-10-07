@@ -4,7 +4,7 @@ version = "0.1.1"
 description = "Zigbee2MQTT diagnostics and control MCP server"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.4.1",
+    "mcp[cli]>=1.4.1,<2",
     "aiomqtt>=2.5.0,<3",
 ]
 
@@ -24,6 +24,7 @@ testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
+    "packaging>=24",
     "pytest>=8.3.5",
     "pytest-asyncio>=0.24.0",
 ]
