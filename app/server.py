@@ -684,15 +684,22 @@ async def permit_join(
 
     Args:
         enable: True to enable pairing, False to disable.
-        time: Timeout in seconds for pairing mode (default: 120).
+        time: Seconds pairing stays open when enabling, 1-254 (default: 120).
+            Ignored when disabling.
     """
+    # Zigbee2MQTT 2.x reads only `time`: 0 closes pairing, anything else opens it for
+    # that many seconds. So disabling always sends 0, and enabling refuses 0.
+    # `value` is ignored by 2.x but required by 1.x, so it stays in the payload.
+    if enable and not 1 <= time <= 254:
+        raise ValueError(f"time must be between 1 and 254 seconds to enable pairing, got {time}")
+
     ctx = mcp.get_context()
     z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
 
     return await z2m.request_response(
         request_topic="zigbee2mqtt/bridge/request/permit_join",
         response_topic="zigbee2mqtt/bridge/response/permit_join",
-        payload={"value": enable, "time": time},
+        payload={"value": enable, "time": time if enable else 0},
     )
 
 

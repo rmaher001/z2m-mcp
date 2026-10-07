@@ -614,6 +614,48 @@ class TestPermitJoin:
             payload={"value": True, "time": 120},
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("time", [120, 200, 254, 0, -1, 300])
+    async def test_disable_sends_time_zero(self, z2m: Z2MClient, time: int) -> None:
+        # Zigbee2MQTT 2.x reads only `time`: anything but 0 OPENS pairing for that long,
+        # so disabling must send 0 whatever `time` says (it used to send 120 and re-open it).
+        z2m.request_response = AsyncMock(return_value={"status": "ok"})
+
+        await permit_join(enable=False, time=time)
+
+        z2m.request_response.assert_called_once_with(
+            request_topic="zigbee2mqtt/bridge/request/permit_join",
+            response_topic="zigbee2mqtt/bridge/response/permit_join",
+            payload={"value": False, "time": 0},
+        )
+
+    @pytest.mark.asyncio
+    async def test_disable_with_default_time_sends_zero(self, z2m: Z2MClient) -> None:
+        z2m.request_response = AsyncMock(return_value={"status": "ok"})
+
+        await permit_join(enable=False)
+
+        assert z2m.request_response.call_args.kwargs["payload"] == {"value": False, "time": 0}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("time", [1, 254])
+    async def test_enable_accepts_boundaries(self, z2m: Z2MClient, time: int) -> None:
+        z2m.request_response = AsyncMock(return_value={"status": "ok"})
+
+        await permit_join(enable=True, time=time)
+
+        assert z2m.request_response.call_args.kwargs["payload"] == {"value": True, "time": time}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("time", [0, -1, 255])
+    async def test_enable_rejects_time_outside_1_to_254(self, z2m: Z2MClient, time: int) -> None:
+        # time 0 would close pairing instead of opening it; Zigbee2MQTT caps the window at 254 s.
+        z2m.request_response = AsyncMock(return_value={"status": "ok"})
+
+        with pytest.raises(ValueError, match="1 and 254"):
+            await permit_join(enable=True, time=time)
+        z2m.request_response.assert_not_called()
+
 
 class TestReconfigureDevice:
     @pytest.mark.asyncio
