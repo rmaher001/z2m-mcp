@@ -238,16 +238,20 @@ async def get_network_map() -> dict[str, Any]:
     """Get the Zigbee network topology map.
 
     Returns structured topology showing coordinator, routers, and end devices
-    with link quality (LQI) on connections. This request may take 10-30 seconds.
+    with link quality (LQI) on connections. Zigbee2MQTT scans every router in
+    turn, so on a large mesh this takes minutes, not seconds.
     """
     ctx = mcp.get_context()
     z2m: Z2MClient = ctx.request_context.lifespan_context["z2m"]
 
+    # routes=False: the output only uses the neighbour (LQI) tables. Asking for
+    # routes makes Zigbee2MQTT also query each router's routing table, which
+    # many routers never answer - each one costs seconds and the scan overran.
     response = await z2m.request_response(
         request_topic="zigbee2mqtt/bridge/request/networkmap",
         response_topic="zigbee2mqtt/bridge/response/networkmap",
-        payload={"type": "raw", "routes": True},
-        timeout=60.0,
+        payload={"type": "raw", "routes": False},
+        timeout=300.0,
     )
 
     data = response.get("data", {})

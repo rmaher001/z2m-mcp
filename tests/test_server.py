@@ -290,6 +290,23 @@ class TestGetNetworkMap:
         assert result["nodes"][0]["friendly_name"] == "Coordinator"
         assert result["links"][0]["lqi"] == 200
 
+    @pytest.mark.asyncio
+    async def test_network_map_skips_routing_tables_and_waits_for_large_mesh(
+        self, z2m: Z2MClient
+    ) -> None:
+        # Route data is never used in the output, and asking for it makes
+        # Zigbee2MQTT query every router's routing table - many routers never
+        # answer, each costing seconds, which pushed a real scan past 60 s.
+        z2m.request_response = AsyncMock(
+            return_value={"status": "ok", "data": {"value": {"nodes": [], "links": []}}}
+        )
+
+        await get_network_map()
+
+        kwargs = z2m.request_response.call_args.kwargs
+        assert kwargs["payload"] == {"type": "raw", "routes": False}
+        assert kwargs["timeout"] >= 300
+
 
 class TestGetDeviceHealth:
     @pytest.mark.asyncio
